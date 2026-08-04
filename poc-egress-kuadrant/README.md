@@ -284,6 +284,11 @@ valores reales del cluster en `origen/06` y `origen/09`.
 
 ## 6. Orden de aplicación
 
+> **Este orden asume que el cluster destino EKS existe.** Hoy no existe. La Etapa A de abajo
+> aplica `origen/02`, `03` y `04` —los tres referencian `app2.paas-demo.bancogalicia.com.ar`— y
+> la Etapa B arranca por `fase0-espejo.yaml`, que espeja el 100% del tráfico contra ese host.
+> Para probar hasta el cutover inclusive sin EKS, ir directo a **§6.1**.
+
 **Etapa 0 — smoke test.** Sin los cuatro pasos de
 [`00-smoke-wristband/`](00-smoke-wristband/README.md) en verde, no arrancar la etapa A: valida
 routing, enforcement de Kuadrant, emisión e inyección del wristband, y la verificación de la firma
@@ -344,6 +349,157 @@ error — **antes de mover un solo request al otro cluster**.
 **Etapa D — cierre.** 100% remoto estable N días → escalar a 0 y borrar el `Deployment server2`
 del origen y el `Service server2-local`. Punto de no retorno.
 
+### 6.1. Variante sin cluster destino — la que aplica hoy (agosto 2026)
+
+Ejercita **toda la mecánica de intercepción hasta el cutover inclusive**, con el 100% del tráfico
+volviendo al `server2` local. Valida lo que no depende del destino: que un Envoy en el medio no
+rompe el camino, que el `Service` se intercepta por selector sin recrearlo, que Kuadrant enforcea
+sobre `openshift-default`, y que el wristband se firma e inyecta. Lo que **no** valida está en §7.6.
+
+**Se saltean cuatro archivos:** `origen/02` (ServiceEntry), `origen/03` (100% remoto), `origen/04`
+(DestinationRule TLS) y `08-rollout/fase0-espejo.yaml`. Los tres primeros sólo configuran el host
+remoto. El cuarto sirve el 100% desde local pero cuelga un `RequestMirror` al destino: un filtro
+con backend inválido no tiene porción de tráfico que aislar, el error es a nivel de rule, y el
+riesgo es que se caiga la rule entera con el backend local adentro.
+
+**Dos trampas que condicionan las verificaciones de todo este camino:**
+
+1. **El BFF manda el `Host` con puerto.** `urllib` arma `Host: server2.echoserver.svc.cluster.local:8080`
+   (verificado en la corrida local del BFF: el hop 2 recibió `host: 127.0.0.1:9002`). El listener
+   de `egress-gw` declara `hostname:` **sin** puerto, y todas las verificaciones históricas de este
+   repo curlean sin puerto. Si Istio no normaliza, son **404 en el 100% del tráfico real**. Gate en
+   la fase 1, cuesta 30 segundos.
+2. **`MIRROR_UPSTREAM_STATUS=false`** en el BFF: un 404 o un 503 del gateway salen como **HTTP 200**
+   hacia el bastión, con el error escondido en `.upstream.status`. Verificar siempre por
+   `.upstream.status`, **nunca** por `%{http_code}`.
+
+#### Fase 0 — pre-flight (read-only)
+
+```bash
+oc -n echoserver get svc server2 -o yaml > /tmp/server2-svc.bak.yaml
+oc -n echoserver get svc server2 -o jsonpath='{.spec.clusterIP}{"\n"}{.spec.selector}{"\n"}'
+oc -n echoserver get pod -l app=server -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}'
+oc -n echoserver get pod -l app=server2 -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels}{"\n"}{end}'
+oc -n echoserver get networkpolicy
+```
+
+De las labels reales salen los `# <<< AJUSTAR` de `origen/07`. **Ajustar la policy a las labels,
+nunca al revés**: el selector de `server2-local` es `{app: server2}`, tocar las labels del pod
+rompe el Service y la policy al mismo tiempo.
+
+Si ya hay un **default-deny** en el namespace, además hace falta un `ipBlock` para el ingress: los
+pods de `gw-hostnet` son hostNetwork, así que el origen que ve `server` es la **IP del nodo**
+(10.254.28.68 / .62 / .63) y ningún `podSelector` matchea eso.
+
+Baseline, 30 requests (ver §7.2 para el `curl`), anotando `st` / `ms` / `pod` / `srcip`.
+**Gate:** `st`=200 en las 30, `pod` no nulo, `srcip` = IP del pod `server`.
+
+#### Fase 1 — gate obligatorio: smoke del wristband
+
+Los cuatro pasos de [`00-smoke-wristband/`](00-smoke-wristband/README.md), que corren enteros en un
+solo cluster. Es kill-switch del diseño: **nunca se probó una AuthPolicy en este cluster** (§5.2ter).
+Descubrirlo después de meter un Envoy en el camino de la app es el orden inverso al que conviene.
+
+Dos añadidos respecto del README del smoke:
+
+- Correr el **paso 1 con las dos formas del Host** (`smoke.egress.local` y `smoke.egress.local:8080`).
+  Es el gate de la trampa 1, barato y temprano.
+- **Borrar `smoke-gw` al terminar**, conservando el Secret. Con AuthPolicy `anonymous` es una fábrica
+  de tokens firmados alcanzable desde cualquier pod del ns, y `origen/07` **no lo cubre**: su
+  podSelector es `gateway-name: egress-gw`.
+
+#### Fase 2 — etapa A: montar el camino nuevo en paralelo (cero impacto)
+
+```bash
+oc apply -n echoserver -f origen/00-httproute-ingress-app1.yaml    # entrada por el Envoy, sin APIM
+oc apply -n echoserver -f origen/01-gateway-egress.yaml            # Service DEBE salir ClusterIP
+oc -n echoserver scale deploy/<deploy-del-gateway> --replicas=2    # antes de que sea camino crítico
+oc apply -n echoserver -f origen/06-service-server2-local.yaml
+oc apply -n echoserver -f origen/08-rollout/fase0a-solo-local.yaml
+```
+
+Las réplicas no son opcionales: post-cutover los pods del gateway **son** los endpoints de
+`server2`, y con una sola réplica un rolling update deja el Service sin endpoints y sin fallback.
+
+Verificaciones, en este orden:
+
+```bash
+# la entrada por el Envoy responde en los tres nodos (HTTP:80 — el 443 no tiene cert, §5.2bis)
+for ip in 10.254.28.68 10.254.28.62 10.254.28.63; do
+  curl -sS -o /dev/null -w "$ip -> %{http_code}\n" -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://$ip/ --max-time 5
+done
+
+# la route enganchó y resolvió
+oc -n echoserver get httproute egress-server2 \
+  -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+
+# ASSERT ANTI-LOOP — tiene que imprimir exactamente `server2-local`
+oc -n echoserver get httproute egress-server2 -o jsonpath='{.spec.rules[*].backendRefs[*].name}{"\n"}'
+```
+
+Si el assert dice `server2`, **parar**: post-cutover ese Service apunta a los pods del propio
+gateway y el loop es infinito, entre Envoy y kube-proxy, por debajo del `MAX_DEPTH` del BFF, con
+una firma ES256 por vuelta. Se detecta contando `incoming authorization request` en los logs de
+Authorino para un único curl.
+
+Después, el camino a mano con las dos formas del Host (§7.1).
+
+#### Fase 3 — cutover B1: cambiar el camino, sin AuthPolicy
+
+```bash
+oc -n echoserver patch svc server2 --type merge -p \
+  '{"spec":{"selector":{"gateway.networking.k8s.io/gateway-name":"egress-gw"}}}'
+```
+
+Ojo con el nombre del Service: `server2`, **no** `server2-local`. Ese typo produce el mismo loop y
+además deja sin camino a los pods reales.
+
+**Gate — tres señales que tienen que darse juntas** (§7.2): `st`=200, `pod` = *el mismo* pod local
+que en el baseline (el destino no cambió, sólo el camino), y `srcip` **cambiado** a la IP del pod
+del gateway. Sin ese cambio de `srcip`, el tráfico sigue yendo derecho y el verde es del camino
+viejo. El delta de `ms` contra el baseline es el costo del Envoy en el medio.
+
+#### Fase 4 — cutover B2: meter la AuthPolicy
+
+```bash
+oc apply -n echoserver -f origen/05-authpolicy-wristband.yaml
+oc -n echoserver get authpolicy egress-server2-jwt \
+  -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{" "}{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+```
+
+**No curlear hasta `True True`**: una AuthPolicy attacheada y no sincronizada deniega todo, y acá
+está en el camino del 100% del tráfico. Después, extraer el token que ve `server2` y validarlo
+(§7.1). El nuevo delta de `ms` es el costo de Authorino por request.
+
+Rollback: `oc -n echoserver delete authpolicy egress-server2-jwt` vuelve al estado de la fase 3.
+
+#### Fase 5 — NetworkPolicies, recién ahora
+
+`origen/07` va **después** del cutover verificado. Dos de sus tres policies cortan el camino
+directo `server` → `server2` y producen un outage inmediato si se aplican antes:
+`server-egress-only-to-gw` limita el egress de `server` al gateway, y `allow-egress-gw-to-server2-local`
+aísla para Ingress a los pods de `server2` dejando entrar sólo al gateway.
+
+```bash
+oc apply -n echoserver -f origen/07-networkpolicy.yaml
+oc -n echoserver get pods -l gateway.networking.k8s.io/gateway-name=egress-gw   # SIGUEN Ready
+oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2 \
+  -o jsonpath='{.items[*].endpoints[*].conditions.ready}{"\n"}'
+```
+
+El chequeo de Ready es obligatorio: si `allow-server-to-egress-gw` bloquea las probes del kubelet,
+los pods del gateway salen del EndpointSlice, `server2` se queda con cero endpoints y es un outage
+total sin fallback.
+
+Nota operativa: una vez aplicada esa policy, los curls desde pods ad-hoc (`oc run`) al gateway dan
+timeout por diseño — pasar a `oc exec deploy/server -- curl`. Eso mismo es la prueba negativa (e)
+de §7.4, la única ejecutable sin destino.
+
+#### Fase 6 — ensayo de rollback en caliente
+
+Con carga corriendo, el patch inverso del selector, contando requests fallidos en la transición.
+Es el número que va a preguntar el comité de cambios.
+
 ## 6bis. Migración progresiva
 
 Una vez hecho el cutover de la intercepción, **todo el reparto se controla desde el HTTPRoute**.
@@ -351,6 +507,7 @@ El `Service` no se vuelve a tocar.
 
 | Fase | Manifiesto | % usuarios al destino | Criterio para avanzar | Rollback |
 |---|---|---|---|---|
+| **0a — solo local** | `08-rollout/fase0a-solo-local.yaml` | 0% (**el destino ni se toca**) | §6.1 en verde: cutover hecho, `srcip` = pod del gateway, wristband emitido y validado localmente | rollback del cutover (patch del selector) |
 | 0 — espejo | `08-rollout/fase0-espejo.yaml` | 0% (copia descartada) | error rate del espejo ≈ 0, p99 destino aceptable, 0 respuestas 401 | quitar el bloque `filters` |
 | 1 — canary dirigido | `08-rollout/fase1-canary-header.yaml` | 0% (opt-in por header) | suite funcional en verde contra el destino, incluidos errores y timeouts | borrar la rule `canary` |
 | 2 — pesos | `08-rollout/fase2-pesos.yaml` | 1 → 5 → 25 → 50 → 100 | sin regresión de error rate ni p99 vs el escalón previo, 24-48h por escalón | `weight: 0` al backendRef remoto |
@@ -431,18 +588,30 @@ y §7.4.
 ### 7.1. Etapa A — pegarle al gateway de egreso a mano
 
 El `Service server2` todavía apunta a los pods locales, así que se prueba el camino nuevo en
-paralelo, forzando el `Host`:
+paralelo, forzando el `Host`. **Con las dos formas del Host, no una:**
 
 ```bash
-oc -n echoserver run curl --rm -it --restart=Never \
-  --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
-  curl -sS -D- -H 'Host: server2.echoserver.svc.cluster.local' \
-  http://egress-gw-openshift-default.echoserver.svc.cluster.local:8080/
+for H in 'server2.echoserver.svc.cluster.local' 'server2.echoserver.svc.cluster.local:8080'; do
+  oc -n echoserver run c$RANDOM --rm -i --restart=Never \
+    --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+    curl -sS -o /dev/null -w "$H -> %{http_code}\n" -H "Host: $H" \
+    http://egress-gw-openshift-default.echoserver.svc.cluster.local:8080/
+done
 ```
 
-Esperado: **200** y, en el cuerpo reflejado por el echo server del destino, el header
-`x-egress-token` con un JWT y los `x-forwarded-src-cluster` / `x-forwarded-src-namespace`
-que agrega la `AuthPolicy` del destino.
+> **Por qué las dos.** El cliente real —el BFF— llama a `http://server2...:8080`, y `urllib` arma
+> `Host: server2.echoserver.svc.cluster.local:8080` **con puerto**, porque no es el 80 (verificado
+> en la corrida local del BFF: el hop 2 recibió `host: 127.0.0.1:9002`). El listener de `egress-gw`
+> declara `hostname:` sin puerto. Si Istio no normaliza, la variante con `:8080` da **404** — y eso
+> es el 100% del tráfico real, mientras la verificación con Host pelado sigue en verde.
+>
+> Si falla: quitar `hostname` del listener en `origen/01` y dejar el matching a las `hostnames` del
+> HTTPRoute, listando ahí las variantes que usen los clientes. El costo es que el gateway acepta
+> cualquier Host, y como la AuthPolicy es `anonymous`, el control queda sólo en la NetworkPolicy.
+
+Esperado: **200 en las dos**, y en el cuerpo reflejado por el echo server que atienda —el del
+destino, o el local si se está corriendo §6.1— el header `x-egress-token` con un JWT. Con destino
+real, además los `x-forwarded-src-cluster` / `x-forwarded-src-namespace` que agrega su `AuthPolicy`.
 
 Decodificar el token reflejado y **confirmar el `kid`** (ver aviso en `gen-signing-key.sh`):
 ```bash
@@ -462,14 +631,34 @@ oc -n echoserver exec deploy/server -- \
 Esperado: ClusterIP intacta, endpoints = pods del gateway, y **200 servido por el `server2`
 local** (fase 0).
 
-El mismo chequeo de punta a punta desde el bastión, sin `exec`, si `server` corre el BFF en
-cascada (§7.0):
+El chequeo que decide, de punta a punta desde el bastión y sin `exec`, con `server` corriendo el
+BFF en cascada (§7.0):
 
 ```bash
-curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
-  | jq '{status: .upstream.status, ms: .upstream.latencyMs,
-         token: (.upstream.body.request.headers["x-egress-token"] != null)}'
+for i in $(seq 1 30); do
+  curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
+    | jq -c '{st: .upstream.status, ms: .upstream.latencyMs,
+              pod: .upstream.body.environment.HOSTNAME,
+              srcip: .upstream.body.host.ip,
+              token: (.upstream.body.request.headers["x-egress-token"] != null)}'
+done | sort | uniq -c
 ```
+
+> **`.upstream.status`, nunca `%{http_code}`.** El BFF corre con `MIRROR_UPSTREAM_STATUS=false`:
+> un 404 o un 503 del gateway salen como **HTTP 200** hacia el bastión, con el error escondido
+> adentro del JSON. Un `curl -w '%{http_code}'` contra `app1` da verde con el cutover roto.
+
+Tres señales que tienen que darse **juntas**:
+
+- `st` = 200 en las 30. Un `404` acá es la trampa del Host con puerto (§7.1); un `503`, endpoints
+  vacíos o el backend local caído.
+- `pod` = **el mismo** pod local que antes del cutover. El destino no cambió, sólo el camino.
+- `srcip` **cambió**: ahora es la IP de un pod del gateway y no la del pod `server`. Es la única
+  prueba directa de que la intercepción tomó efecto; sin ese cambio, el tráfico sigue yendo
+  derecho y el verde es del camino viejo.
+
+El delta de `ms` contra el baseline de §6.1 fase 0 es el costo del Envoy; el delta contra la fase 3,
+el de Authorino.
 
 ### 7.3. Etapa C — reparto efectivo
 
@@ -528,6 +717,40 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 
 Con carga corriendo, peso remoto a 0 y verificar 100% local sin errores en el cliente; después
 probar el rollback de intercepción (`patch` del selector) y verificar lo mismo.
+
+### 7.6. Qué NO queda validado corriendo §6.1 (sin cluster destino)
+
+Verde en §6.1 significa *"la intercepción local funciona y el token se emite"*. No significa nada
+de esto:
+
+- **Todo el tramo remoto.** DNS de `app2` desde un pod, ruteo L3 a la VPC, RTT inter-cluster. Y el
+  **proxy corporativo**: si la salida obligatoria es por proxy, este patrón no funciona tal cual y
+  el egreso hay que rediseñarlo (`origen/02` §Pre-requisitos de red). Sigue siendo pregunta abierta.
+- **Todo el TLS origination.** `ServiceEntry` con `resolution: DNS` y 443 declarado `protocol: HTTP`,
+  `DestinationRule` con `sni` y `credentialName: destino-ca` — ese Secret ni existe. Y la decisión de
+  no reescribir el `Host` (§4), que descansa entera en que el SNI lo fije el `DestinationRule`.
+- **Que este controller acepte `backendRef kind: Hostname`,** y que acepte `weight` sobre él. Se
+  puede sondear sin destino con una route descartable contra un host que ya esté en el registry
+  (el FQDN de `server2-local`) — ver la nota al pie de `08-rollout/fase0a-solo-local.yaml`. Eso no
+  prueba la resolución de un host externo.
+- **La validación en destino.** `check-token.py` prueba que la clave pública verifica la firma, no
+  que el destino esté configurado con ese JWKS. Autorización por claims, 403 ante claims ajenos, y
+  `exp`/skew de reloj entre clusters quedan sin ejercitar.
+- **Las pruebas negativas (a)–(d) de §7.4.** Todas necesitan destino. O sea: la parte de la PoC que
+  demuestra que el esquema **es seguro**, y no sólo que funciona, queda entera afuera. Sólo la (e)
+  —otro pod no puede pedir token— es ejecutable, y recién en la fase 5.
+- **El pooling de conexiones del cliente.** El BFF abre una conexión TCP por request, así que el
+  cutover se va a ver instantáneo y sin errores. Un cliente con pool persistente (JVM, Go con un
+  `http.Transport` reutilizado) mantiene conexiones contra los pods viejos hasta que se cierren: la
+  migración real va a tener una cola larga que esta PoC **no puede mostrar**.
+- **La capacidad.** 30 requests secuenciales no dicen nada sobre el dimensionamiento del gateway ni
+  sobre Authorino firmando ES256 bajo carga.
+- **La publicación real de `app1` sin APIM.** Toda la validación entra por HTTP a IPs de nodo con
+  `Host` forzado, porque el listener 443 de `gw-hostnet` sigue sin recibir el certificado por SDS
+  (§5.2bis). Publicarlo de verdad exige resolver eso o terminar TLS en el F5 con pool a
+  `<IP de nodo>:80`, más el cambio del Virtual Server.
+- **La limitación de multi-tenancy de la clave de firma** (§8bis). Con un solo consumidor no se
+  toca. No confundir "la PoC salió verde" con "el patrón es adoptable".
 
 ## 8. Qué falta para producción
 
@@ -649,6 +872,7 @@ origen/04-destinationrule-tls.yaml             TLS origination + SNI
 origen/05-authpolicy-wristband.yaml            firma e inyección del JWT
 origen/06-service-server2-local.yaml           Service aditivo -> pods reales (backend del canary)
 origen/07-networkpolicy.yaml                   quién puede pedir token + camino local
+origen/08-rollout/fase0a-solo-local.yaml       SIN DESTINO: 100% local, sin espejo (§6.1)
 origen/08-rollout/fase0-espejo.yaml            espejo, cero impacto
 origen/08-rollout/fase1-canary-header.yaml     canary por header x-canary
 origen/08-rollout/fase2-pesos.yaml             reparto 1/5/25/50/100

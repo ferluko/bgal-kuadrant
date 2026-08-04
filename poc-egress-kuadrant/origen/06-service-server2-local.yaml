@@ -27,6 +27,12 @@ spec:
       port: 8080
       targetPort: 8080
       protocol: TCP
+      # A diferencia del Service `server2` —que consume kube-proxy directo— este Service es
+      # backendRef de una HTTPRoute, así que Istio construye el cluster upstream a partir de
+      # este puerto. `server-port` no es un nombre de protocolo conocido para Istio: con HTTP/1.1
+      # plano funciona igual, lo que se degrada es la clasificación L7 (telemetría, y cualquier
+      # upgrade futuro a h2c/gRPC). Declararlo es aditivo y no afecta al Service existente.
+      appProtocol: http
 ---
 # Verificación — tiene que devolver las MISMAS IPs que el Service server2 actual:
 #   oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2-local \
