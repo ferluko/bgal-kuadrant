@@ -94,17 +94,42 @@ al hop 1.
 
 ## 3. Desplegar
 
-```bash
-oc apply -n echoserver -f 00-configmap-bff.yaml -f 01-server-bff.yaml -f 02-server2-echo.yaml
-```
-
-**Si `server` ya existe** como echo-server puro, `01` lo reemplaza. Mantiene a propósito el
-label `app: server` y el puerto `8080`, así que el `Service server`, el `HTTPRoute app1` y
-las policies de Kuadrant siguen enganchando. Respaldar antes:
+Respaldar primero el `server` actual, si existe:
 
 ```bash
 oc -n echoserver get deploy server -o yaml > /tmp/server-deploy.bak.yaml
 ```
+
+ConfigMap y `server2` van con `apply` sin vueltas:
+
+```bash
+oc apply -n echoserver -f 00-configmap-bff.yaml -f 02-server2-echo.yaml
+```
+
+**`server` NO va con `apply` si ya existe** — usar `replace --force`:
+
+```bash
+oc -n echoserver replace --force -f 01-server-bff.yaml
+```
+
+> **Por qué, verificado en `paas-arqlab` (2026-08-04).** En la lista `containers` la
+> estrategia de merge es **por `name`**. Si el `server` original no fue creado con `apply`
+> (no tiene la anotación `kubectl.kubernetes.io/last-applied-configuration`), `oc apply` no
+> tiene cómo saber que el contenedor viejo sobra: **agrega `bff` y conserva el anterior**. El
+> pod queda con dos contenedores compartiendo el network namespace, los dos bindean `:8080`,
+> y el segundo muere con `EADDRINUSE` → exit 1 → **CrashLoopBackOff**, con el `bff` corriendo
+> sano al lado (pod en `1/2`).
+>
+> `replace --force` borra y recrea el Deployment: hay unos segundos sin `server`, irrelevante
+> en la PoC. Chequeo de que quedó un solo contenedor:
+>
+> ```bash
+> oc -n echoserver get pod -l app=server \
+>   -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}'
+> ```
+
+El manifiesto mantiene a propósito el label `app: server` y el puerto `8080`, así que el
+`Service server`, el `HTTPRoute app1` y las policies de Kuadrant siguen enganchando.
 
 Si `server2` ya está desplegado no hace falta aplicar `02`: está para dejar documentada la
 config con la que se probó — en particular `PORT=8080`, que **no es cosmético**: el default
@@ -122,6 +147,30 @@ cualquier hop, encadenando por `UPSTREAM_URL` y anidando en `.upstream.body.upst
 
 Cubre: cascada básica, propagación de headers vista desde el hop 2, path/query, POST con
 body, `X-ECHO-CODE: 503`, `X-ECHO-TIME: 2000`, timeout → 502, y `X-Cascade-Skip`.
+
+### Entrando por el APIM (3scale / APIcast)
+
+El `server` se puede publicar como backend de un producto de 3scale en lugar de (o además
+de) el `HTTPRoute` directo. La URL incluye el path del producto y las credenciales van por
+header:
+
+```bash
+URL=https://echoserver-b2c.apps.paas-arqlab.bancogalicia.com.ar/v1 INSECURE=1 \
+HDRS='app_id: <app_id>;app_key: <app_key>' ./test-cascada.sh
+```
+
+Verificado contra `echoserver-b2c` en `paas-arqlab` (2026-08-04): la cascada atraviesa
+APIcast sin cambios — `hop1 = server-…`, `hop2 = server2-564d58898-dhcpr`, `status 200`,
+`10.4 ms`.
+
+Dos salvedades al correr el script completo por esta vía:
+
+- **Los mapping rules del producto tienen que aceptar los paths** que usan los casos 3 y 4
+  (`/a/b/c`, `/pagos`). Si el producto sólo mapea `/`, esos casos van a dar 404 del APIM, no
+  del BFF — se distingue porque la respuesta no trae `hop`.
+- **APIcast puede filtrar headers.** Si los casos 5 y 6 (`X-ECHO-CODE`, `X-ECHO-TIME`) no
+  surten efecto, mirá `.upstream.body.request.headers` del caso 2: ahí se ve exactamente qué
+  llegó al hop 2 y si el header se perdió en el APIM o en el BFF.
 
 Un vistazo rápido de quién contestó en cada hop:
 
@@ -174,8 +223,19 @@ y después con el **hop 2 corriendo la imagen real `docker.io/ealen/echo-server:
 - cascada de 3 niveles: `X-Echo-Depth` incrementando (1, 2) y `X-Cascade-Via` acumulando
   (`server`, `server,server2b`).
 
-**No probado:** el despliegue en OpenShift (SCC `restricted-v2`, montaje del ConfigMap,
-resolución del FQDN del Service). Nada de lo anterior lo ejercita.
+**En `paas-arqlab` (OCP 4.20, 2026-08-04)** quedó verificada la cascada de punta a punta,
+entrando por el APIM (`echoserver-b2c` → APIcast → `server`):
+
+- pull de `ubi9/python-312:1`, montaje del ConfigMap y arranque bajo `restricted-v2` con
+  `runAsNonRoot` + `readOnlyRootFilesystem` + `drop: ALL`;
+- hop 1 → hop 2 por el FQDN del Service, `status 200` en **10,4 ms**;
+- identificación de los dos pods (`server-…` / `server2-564d58898-dhcpr`), con
+  `.upstream.body.environment.HOSTNAME` resolviendo correcto en el hop 2;
+- IP de origen vista por el hop 2 (`::ffff:10.131.1.196`) — la línea de base pre-cutover
+  para la PoC de egreso.
+
+**No ejercitado todavía en cluster:** el resto de `test-cascada.sh` (POST con body,
+`X-ECHO-CODE`, `X-ECHO-TIME`, timeout → 502, `X-Cascade-Skip`) y la cascada de 3 niveles.
 
 **Límites conocidos:**
 

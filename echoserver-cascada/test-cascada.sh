@@ -4,12 +4,25 @@
 #   ./test-cascada.sh                                        # via HTTPRoute publicado
 #   URL=http://10.254.28.68 HOST=app1.paas-demo.bancogalicia.com.ar ./test-cascada.sh
 #   URL=http://localhost:8080 ./test-cascada.sh              # con `oc port-forward svc/server 8080:8080`
+#
+# Por el APIM (3scale/APIcast) — la URL incluye el path del producto y las credenciales van
+# en HDRS, separadas por `;`:
+#   URL=https://echoserver-b2c.apps.paas-arqlab.bancogalicia.com.ar/v1 INSECURE=1 \
+#   HDRS='app_id: 65ce03a7;app_key: b7e44705ce8474b15c90a1b71c9d61d3' ./test-cascada.sh
 set -euo pipefail
 
 URL="${URL:-http://app1.paas-demo.bancogalicia.com.ar}"
 HOST="${HOST:-}"
 CURL=(curl -sS --max-time 15)
 [[ -n "$HOST" ]] && CURL+=(-H "Host: $HOST")
+[[ -n "${INSECURE:-}" ]] && CURL+=(-k)
+# Headers extra separados por `;` (credenciales del APIM, tokens, lo que haga falta).
+if [[ -n "${HDRS:-}" ]]; then
+  IFS=';' read -ra _hdrs <<< "$HDRS"
+  for _h in "${_hdrs[@]}"; do
+    [[ -n "${_h// /}" ]] && CURL+=(-H "${_h# }")
+  done
+fi
 
 hr() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 

@@ -406,15 +406,27 @@ El workload de cascada de [`../echoserver-cascada/`](../echoserver-cascada/) lo 
 sigue siendo `ealen/echo-server` sin tocar.
 
 ```bash
-oc apply -n echoserver \
-  -f ../echoserver-cascada/00-configmap-bff.yaml \
-  -f ../echoserver-cascada/01-server-bff.yaml
+oc -n echoserver get deploy server -o yaml > /tmp/server-deploy.bak.yaml   # respaldo
+oc apply   -n echoserver -f ../echoserver-cascada/00-configmap-bff.yaml
+oc replace -n echoserver --force -f ../echoserver-cascada/01-server-bff.yaml
 ```
 
+> **`replace --force`, no `apply`** — verificado en `paas-arqlab` (2026-08-04). La lista
+> `containers` mergea **por `name`**: si el `server` original no fue creado con `apply`, éste
+> no puede saber que el contenedor viejo sobra, así que **agrega `bff` y conserva
+> `echo-server`**. Los dos bindean `:8080` en el network namespace del pod y el segundo muere
+> con `EADDRINUSE` (`errno -98`, exit 1) → **CrashLoopBackOff**, con `bff` corriendo sano al
+> lado y el pod en `1/2`. Chequear que quedó un solo contenedor:
+>
+> ```bash
+> oc -n echoserver get pod -l app=server \
+>   -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}'
+> ```
+
 Mantiene `app: server` y el puerto 8080, así que el `Service server`, el `HTTPRoute app1`
-(`origen/00`) y las policies siguen enganchando sin cambios. Respaldar el Deployment actual
-antes de aplicar. Con esto, `curl` desde el bastión a `app1` recorre y muestra los dos hops
-en una sola respuesta — que es lo que usan §7.2, §7.3 y §7.4.
+(`origen/00`) y las policies siguen enganchando sin cambios. Con esto, `curl` desde el bastión
+a `app1` recorre y muestra los dos hops en una sola respuesta — que es lo que usan §7.2, §7.3
+y §7.4.
 
 ### 7.1. Etapa A — pegarle al gateway de egreso a mano
 
