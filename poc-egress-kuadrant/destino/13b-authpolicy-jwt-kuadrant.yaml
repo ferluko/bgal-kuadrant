@@ -1,0 +1,88 @@
+# Cluster DESTINO — OPCIÓN B, RECOMENDADA: validación del JWT con Kuadrant.
+#
+# Habilitada por la enmienda 2026-08-04 del ADR de componentes upstream
+# (01_apim/ADR-kuadrant-rhcl-componentes-upstream.md §2bis): se acepta **Kuadrant
+# upstream en EKS** porque RHCL sobre EKS recién estará soportado en 2027.
+#
+# Por qué es la recomendada: mismo plano de políticas de los dos lados (AuthPolicy
+# en el origen y en el destino), y camino de convergencia directo cuando salga
+# RHCL/EKS — no hay rediseño, sólo cambio de canal de distribución.
+#
+# Condiciones que trae la excepción del ADR y que aplican a este manifiesto:
+#   - fijar versión explícita del operador upstream (no latest/main);
+#   - vigilancia propia de CVE sobre operator/Authorino/Limitador en el tramo AWS
+#     (no hay SLA de Red Hat acá);
+#   - regression testing de AuthPolicy/RateLimitPolicy en cada upgrade;
+#   - migrar a RHCL/EKS cuando esté disponible.
+#
+# Requiere además destino/11-jwks-static.yaml (Authorino no acepta JWKS inline) y
+# la label kuadrant.io/gateway: "true" en el Gateway (destino/10).
+#
+# Alternativa de menor huella, sin Kuadrant en EKS: 13a-istio-jwt-validation.yaml.
+#
+# Sin header x-egress-token válido -> 401. Con token válido pero claims que no
+# corresponden a este consumidor -> 403.
+# La firma se valida contra el JWKS local (clave pública pineada); exp/iat los
+# valida el propio verificador JWT.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: server2-ingress-jwt
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: server2
+  rules:
+    authentication:
+      "egress-wristband":
+        jwt:
+          jwksUrl: http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+            prefix: ""
+    authorization:
+      "claims-esperados":
+        patternMatching:
+          patterns:
+            - predicate: |
+                auth.identity.iss == "https://egress.paas-arqlab.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.aud == "app2.paas-demo.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.src_cluster == "paas-arqlab"
+            - predicate: |
+                auth.identity.src_namespace == "echoserver"
+            - predicate: |
+                auth.identity.dst_service == "server2"
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de server2"
+      success:
+        # Propaga la procedencia al backend: útil para logs/trazas de la app.
+        headers:
+          "x-forwarded-src-cluster":
+            plain:
+              expression: auth.identity.src_cluster
+          "x-forwarded-src-namespace":
+            plain:
+              expression: auth.identity.src_namespace
+---
+# Verificación:
+#   oc -n echoserver get authpolicy server2-ingress-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Notas de compatibilidad:
+#  - "predicate" (CEL) requiere Authorino >= 0.19 / RHCL 1.x. En versiones
+#    previas la sintaxis equivalente es:
+#       patterns:
+#         - {selector: auth.identity.aud, operator: eq, value: app2.paas-demo.bancogalicia.com.ar}
+#  - Si "aud" llegara como lista en vez de string, cambiar el predicate a:
+#       "app2.paas-demo.bancogalicia.com.ar" in auth.identity.aud

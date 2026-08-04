@@ -1,0 +1,69 @@
+# Cluster ORIGEN — EL CUTOVER DE LA INTERCEPCIÓN. Aplicar ÚLTIMO.
+#
+# El Service `server2` NO se recrea: se le cambia el `selector` in-place para que
+# sus endpoints pasen a ser los pods del gateway de egreso en lugar de los pods de
+# la app. La ClusterIP (172.30.169.54) no cambia, el nombre DNS no cambia, el
+# puerto no cambia. El Deployment `server2` NO se toca: sigue corriendo y sirviendo
+# a través del Service `server2-local` (06).
+#
+# Para el cliente `server` no cambió nada: misma URL, misma IP, mismo puerto.
+#
+# ESTADO ACTUAL DEL SERVICE VERIFICADO EN paas-arqlab (2026-08):
+#   selector: {"app":"server2"}
+#   ports:    [{"name":"server-port","port":8080,"protocol":"TCP","targetPort":8080}]
+# targetPort es NUMÉRICO -> el único campo a cambiar es el selector.
+#
+# PRECONDICIONES:
+#   1. 08-rollout/fase0-espejo.yaml ya aplicado -> el tráfico que entre al gateway
+#      vuelve a los pods locales. El camino cambia, el destino todavía no.
+#   2. 06-service-server2-local.yaml aplicado y con los mismos endpoints que server2.
+#   3. La cadena de egreso probada a mano (README §7.1).
+#
+# FORMA RECOMENDADA DE APLICARLO — patch de un campo, con backup:
+#
+#   oc -n echoserver get svc server2 -o yaml > /tmp/server2-svc.bak.yaml
+#   oc -n echoserver patch svc server2 --type merge -p \
+#     '{"spec":{"selector":{"gateway.networking.k8s.io/gateway-name":"egress-gw"}}}'
+#
+# ROLLBACK — un patch, ~1 segundo, los pods reales nunca se detuvieron:
+#
+#   oc -n echoserver patch svc server2 --type merge -p \
+#     '{"spec":{"selector":{"app":"server2"}}}'
+#
+# ---------------------------------------------------------------------------
+# Representación declarativa del estado final del Service, para GitOps.
+# Campos tomados del Service real; no incluir clusterIP (inmutable y ya asignada,
+# `apply` la preserva).
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/intercepcion: "egress-gw"
+    poc.galicia.io/rollback: 'oc -n echoserver patch svc server2 --type merge -p ''{"spec":{"selector":{"app":"server2"}}}'''
+spec:
+  type: ClusterIP
+  # ÚNICO cambio funcional respecto del Service original.
+  # La label la ponen los pods que autodespliega el deployment controller de istiod
+  # para la GatewayClass openshift-default (verificado: gw-one-*-xjr8z en ns connlink
+  # matchea gateway.networking.k8s.io/gateway-name=gw-one).
+  selector:
+    gateway.networking.k8s.io/gateway-name: egress-gw
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Verificación inmediata:
+#   # la ClusterIP NO cambió
+#   oc -n echoserver get svc server2 -o jsonpath='{.spec.clusterIP}{"\n"}'   # 172.30.169.54
+#
+#   # los endpoints ahora son pods del gateway
+#   oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2 \
+#     -o jsonpath='{.items[*].endpoints[*].targetRef.name}{"\n"}'
+#
+#   # y el tráfico sigue llegando a la app local (fase 0)
+#   oc -n echoserver exec deploy/server -- \
+#     curl -s -o /dev/null -w '%{http_code}\n' http://server2.echoserver.svc.cluster.local:8080/

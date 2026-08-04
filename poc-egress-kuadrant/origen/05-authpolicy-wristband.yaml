@@ -1,0 +1,68 @@
+# Cluster ORIGEN — el corazón de la PoC.
+#
+# Authorino firma un JWT de corta vida ("Festival Wristband") con la clave
+# privada del Secret egress-echoserver-1 y lo inyecta en el request SALIENTE,
+# en el header x-egress-token.
+#
+# OJO CON EL NAMESPACE DEL SECRET: este AuthPolicy vive en `echoserver`, pero
+# Kuadrant lo traduce a un AuthConfig en `kuadrant-system`, y Authorino resuelve
+# signingKeyRefs contra el ns del AUTHCONFIG. El Secret va en `kuadrant-system`.
+#
+# El cliente (server) no manda ninguna credencial y no se modifica: por eso la
+# autenticación de entrada al gateway de egreso es anonymous. Quién puede llegar
+# al gateway se restringe por NetworkPolicy (07) — ver §8 del README para el
+# endurecimiento a identidad de workload (mTLS / SA token).
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: egress-server2-jwt
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: egress-server2
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+    response:
+      success:
+        headers:
+          # El nombre de la clave ES el nombre del header inyectado.
+          # Se usa header propio (no Authorization) porque el wristband se
+          # inyecta crudo, sin prefijo "Bearer", y así no pisamos una eventual
+          # credencial de negocio del request original.
+          "x-egress-token":
+            wristband:
+              # Se usa como claim "iss". El destino lo valida explícitamente.
+              # No dependemos del endpoint de discovery de Authorino: en el
+              # destino la clave pública va pineada (ver destino/11-jwks-static.yaml).
+              issuer: https://egress.paas-arqlab.bancogalicia.com.ar
+              tokenDuration: 300
+              customClaims:
+                "aud":
+                  value: app2.paas-demo.bancogalicia.com.ar
+                "src_cluster":
+                  value: paas-arqlab
+                "src_namespace":
+                  value: echoserver
+                "src_service":
+                  value: server
+                "dst_service":
+                  value: server2
+              signingKeyRefs:
+                - name: egress-echoserver-1
+                  algorithm: ES256
+---
+# Verificación:
+#   oc -n echoserver get authpolicy egress-server2-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# El Secret egress-echoserver-1 lo genera keys/gen-signing-key.sh y DEBE vivir en
+# `kuadrant-system`. Si falta o está en otro ns, el síntoma es:
+#   oc -n echoserver get authpolicy egress-server2-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#   -> "AuthPolicy waiting for the following components to sync: [AuthConfig (...)]"
+#   oc -n kuadrant-system logs deploy/authorino | grep 'Reconciler error'
+#   -> error: Secret "egress-echoserver-1" not found

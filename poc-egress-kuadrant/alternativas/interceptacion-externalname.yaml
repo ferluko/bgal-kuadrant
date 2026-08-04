@@ -1,0 +1,41 @@
+# FALLBACK de origen/09-cutover-service-selector.yaml
+#
+# Usar SÓLO si la verificación bloqueante del README §5 muestra que los pods del
+# gateway NO corren en el namespace `echoserver` (por ejemplo, en openshift-ingress):
+#
+#   oc get pods -A -l gateway.networking.k8s.io/gateway-name=gw-one -o wide
+#
+# Los selectores de Service son namespace-scoped, así que en ese caso ningún
+# Service de echoserver puede seleccionar esos pods y la intercepción por selector
+# no es posible. El Service GENERADO por el Gateway sí vive en el ns del Gateway
+# aunque sus pods no, así que se lo puede alcanzar por DNS.
+#
+# Costos respecto de la variante por selector:
+#   - Un ClusterIP no se puede mutar a ExternalName in-place: hay que borrar y
+#     recrear el Service, y la ClusterIP CAMBIA.
+#   - Aparece la capa DNS: resolución por CNAME, con el riesgo de clientes que
+#     cachean DNS agresivamente (JVM con networkaddress.cache.ttl=-1 necesita
+#     restart del pod tras el cutover).
+#   - El rollback también es delete + recreate.
+#
+# El resto del plan no cambia: las fases de 08-rollout/, los pesos y el rollback
+# por peso funcionan igual.
+#
+#   oc -n echoserver get svc server2 -o yaml > /tmp/server2-svc.bak.yaml   # rollback
+#   oc -n echoserver delete svc server2
+#   oc apply -f alternativas/interceptacion-externalname.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/rollback: "oc -n echoserver delete svc server2 && oc apply -f /tmp/server2-svc.bak.yaml"
+spec:
+  type: ExternalName
+  # <<< AJUSTAR al nombre real del Service generado por el Gateway:
+  #   oc -n echoserver get svc -l gateway.networking.k8s.io/gateway-name=egress-gw
+  externalName: egress-gw-openshift-default.echoserver.svc.cluster.local
+---
+# ExternalName NO remapea puertos: el gateway DEBE escuchar en 8080, que es lo que
+# hace el listener de origen/01-gateway-egress.yaml.

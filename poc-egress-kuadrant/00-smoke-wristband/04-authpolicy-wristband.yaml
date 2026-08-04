@@ -1,0 +1,52 @@
+# SMOKE TEST — PASO 3: la pieza que nadie probó todavía.
+#
+# El smoke test de la guía de instalación de RHCL valida OPA deny-all y API key.
+# NO valida `response.success.headers` con `wristband`, que es el corazón de esta
+# PoC: Authorino firmando un JWT con una clave del namespace e inyectándolo en el
+# request que va al upstream.
+#
+# Idéntica a origen/05-authpolicy-wristband.yaml salvo el targetRef, para que lo
+# que se valide acá sea exactamente lo que después se usa en producción.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: smoke-wristband
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: smoke-wristband
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+    response:
+      success:
+        headers:
+          "x-egress-token":
+            wristband:
+              issuer: https://egress.paas-arqlab.bancogalicia.com.ar
+              tokenDuration: 300
+              customClaims:
+                "aud":
+                  value: app2.paas-demo.bancogalicia.com.ar
+                "src_cluster":
+                  value: paas-arqlab
+                "src_namespace":
+                  value: echoserver
+                "src_service":
+                  value: server
+                "dst_service":
+                  value: server2
+              signingKeyRefs:
+                - name: egress-echoserver-1
+                  algorithm: ES256
+---
+# Requiere el Secret egress-echoserver-1 en el ns KUADRANT-SYSTEM (no en echoserver:
+# Kuadrant traduce este AuthPolicy a un AuthConfig en kuadrant-system y Authorino
+# resuelve signingKeyRefs contra el ns del AuthConfig):
+#   ../keys/gen-signing-key.sh && oc apply -f ../keys/out/secret.yaml
+#
+# Esperado: 200, y en el cuerpo reflejado por el echo server, el header
+# x-egress-token con un JWT.

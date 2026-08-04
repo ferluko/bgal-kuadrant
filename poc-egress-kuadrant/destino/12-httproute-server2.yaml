@@ -1,0 +1,29 @@
+# Cluster DESTINO — ruta hacia el server2 ya migrado.
+#
+# Asume que server2 (Deployment + Service ClusterIP:8080) fue desplegado igual
+# que en el origen, en el ns echoserver de este cluster.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: server2
+  namespace: echoserver
+spec:
+  parentRefs:
+    - name: ingress-gw
+      sectionName: https
+  hostnames:
+    # El Host que llega desde el origen SIN reescribir. El listener no declara
+    # hostname, así que no hay restricción de intersección y la ruta se acepta.
+    - "server2.echoserver.svc.cluster.local"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server2
+          port: 8080
+---
+# Verificación:
+#   oc -n echoserver get httproute server2 \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'

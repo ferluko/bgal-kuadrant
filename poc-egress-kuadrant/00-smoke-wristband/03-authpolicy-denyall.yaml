@@ -1,0 +1,33 @@
+# SMOKE TEST — PASO 2: ¿Kuadrant realmente ENFORCEA sobre openshift-default?
+#
+# Deny-all. Si tras aplicar esto el curl sigue devolviendo 200, la AuthPolicy
+# quedó `Accepted` pero NO está en el camino de datos: el gateway de esta clase
+# no tiene enganchado el ext_authz/wasm-shim de Kuadrant. Es exactamente el
+# escenario que hay que descartar antes de invertir en el resto de la PoC.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: smoke-denyall
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: smoke-wristband
+  rules:
+    authorization:
+      "deny-all":
+        opa:
+          rego: "allow = false"
+---
+# Esperado: 403.
+#
+#   oc -n echoserver get authpolicy smoke-denyall \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Ojo con la diferencia: `Accepted` significa que el operador entendió la política.
+# `Enforced` significa que la empujó al data plane. Un 200 con ambas en True es un
+# hallazgo de plataforma, no un error de esta PoC.
+#
+# Borrar esta policy antes de aplicar la del paso 3:
+#   oc -n echoserver delete authpolicy smoke-denyall

@@ -1,0 +1,28 @@
+# SMOKE TEST — ruta al server2 local, que refleja los headers recibidos.
+#
+# El echo server es la instrumentación: lo que aparezca en su respuesta es
+# literalmente lo que el gateway le mandó al upstream. Es la única forma de
+# comprobar que el wristband se inyectó, sin mirar logs de Envoy.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: smoke-wristband
+  namespace: echoserver
+spec:
+  parentRefs:
+    - name: smoke-gw
+      sectionName: http
+  hostnames:
+    - "smoke.egress.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server2
+          port: 8080
+---
+# Nota: apunta al Service `server2` con su selector ORIGINAL (app: server2).
+# Este smoke test se corre ANTES del cutover, así que no hay riesgo de loop.

@@ -1,0 +1,100 @@
+# HOP 1 — `server`, el BFF. Es el que encadena.
+#
+#   bastión --> server (este) --> server2 --> server (anida la respuesta) --> bastión
+#
+# ATENCIÓN si ya tenés `server` desplegado como echo-server puro en `echoserver`:
+# este Deployment lo REEMPLAZA. Mantiene a propósito `app: server` y el puerto 8080
+# para que el Service `server`, el HTTPRoute `app1` y las policies de Kuadrant sigan
+# enganchando sin cambios. Guardá el manifiesto anterior antes de aplicar:
+#   oc -n echoserver get deploy server -o yaml > /tmp/server-deploy.bak.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server
+  namespace: echoserver
+  labels:
+    app: server
+    poc.galicia.io/rol: cascada-hop1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server
+  template:
+    metadata:
+      labels:
+        app: server
+        poc.galicia.io/rol: cascada-hop1
+    spec:
+      containers:
+        - name: bff
+          # UBI9 + Python 3.12. Sólo stdlib, así que no hace falta build ni pip.
+          # Si el cluster tira de la cache pull-through de Quay (ADR-0002), reemplazar por
+          # <quay-interno>/registry.access.redhat.com/ubi9/python-312:1
+          image: registry.access.redhat.com/ubi9/python-312:1
+          command: ["python3", "/opt/cascade/bff.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOP_NAME
+              value: server
+            # ESTA es la URL que la PoC de egreso intercepta cambiándole el selector
+            # al Service server2. El BFF no se entera: sigue pegándole al mismo FQDN.
+            - name: UPSTREAM_URL
+              value: http://server2.echoserver.svc.cluster.local:8080
+            - name: UPSTREAM_TIMEOUT_MS
+              value: "5000"
+            # false => este hop devuelve 200 aunque server2 conteste 503, y el 503 se ve
+            # en .upstream.status. Poner "true" para que curl -w '%{http_code}' lo refleje.
+            - name: MIRROR_UPSTREAM_STATUS
+              value: "false"
+            - name: ENABLE_ENVIRONMENT
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: bff
+              mountPath: /opt/cascade
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: bff
+          configMap:
+            name: cascade-bff
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: echoserver
+  labels:
+    app: server
+spec:
+  type: ClusterIP
+  selector:
+    app: server
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

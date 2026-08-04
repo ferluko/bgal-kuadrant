@@ -1,0 +1,223 @@
+# BFF de cascada — el "echo server que sí llama a otro echo server".
+#
+# Ealenn/Echo-Server no hace llamadas salientes (ver README.md §1), así que el hop
+# intermedio lo resuelve este servidor de ~150 líneas de stdlib de Python: refleja el
+# request que le llegó (con la MISMA forma de JSON que echo-server: host/http/request)
+# y le cuelga abajo, en `upstream`, la respuesta completa del hop siguiente.
+#
+# Sin dependencias: sólo la stdlib. No necesita pip, ni red al instalar, ni build.
+#
+# Configuración por env (ver 01-deployment-server.yaml):
+#   PORT                    puerto de escucha                       (default 8080)
+#   HOP_NAME                nombre del hop en la salida             (default hostname)
+#   UPSTREAM_URL            si está vacío, NO encadena: es un echo terminal
+#   UPSTREAM_KEEP_PATH      reenvía path+query al upstream          (default true)
+#   UPSTREAM_TIMEOUT_MS     timeout de la llamada saliente          (default 5000)
+#   UPSTREAM_ERROR_STATUS   status propio si el upstream falla      (default 502)
+#   MIRROR_UPSTREAM_STATUS  devolver el status del upstream         (default false)
+#   MAX_DEPTH               corta cascadas infinitas                (default 5)
+#   ENABLE_ENVIRONMENT      incluir os.environ en la salida         (default false)
+#   STRIP_HEADERS           headers a NO propagar, separados por ,  (default "")
+#
+# Headers de control desde el cliente:
+#   X-Cascade-Skip: 1       este hop responde sin llamar al upstream
+#   X-Echo-Depth: N         profundidad actual (la setea cada hop, no hace falta mandarla)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cascade-bff
+  namespace: echoserver
+  labels:
+    poc.galicia.io/rol: cascada-bff
+data:
+  bff.py: |
+    #!/usr/bin/env python3
+    """BFF de cascada para PoC de red: echo local + respuesta anidada del upstream."""
+    import json
+    import os
+    import socket
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+    def _flag(name, default):
+        return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
+    PORT = int(os.environ.get("PORT", "8080"))
+    HOP_NAME = os.environ.get("HOP_NAME") or socket.gethostname()
+    UPSTREAM_URL = os.environ.get("UPSTREAM_URL", "").strip().rstrip("/")
+    UPSTREAM_KEEP_PATH = _flag("UPSTREAM_KEEP_PATH", "true")
+    UPSTREAM_TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT_MS", "5000")) / 1000.0
+    UPSTREAM_ERROR_STATUS = int(os.environ.get("UPSTREAM_ERROR_STATUS", "502"))
+    MIRROR_UPSTREAM_STATUS = _flag("MIRROR_UPSTREAM_STATUS", "false")
+    MAX_DEPTH = int(os.environ.get("MAX_DEPTH", "5"))
+    ENABLE_ENVIRONMENT = _flag("ENABLE_ENVIRONMENT", "false")
+    STRIP_HEADERS = set(
+        h.strip().lower() for h in os.environ.get("STRIP_HEADERS", "").split(",") if h.strip()
+    )
+
+    # No se reenvían: son de la conexión, no del mensaje. Reenviar Host o Content-Length
+    # rompe el hop siguiente (SNI/routing equivocado, body truncado).
+    HOP_BY_HOP = set([
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
+        "expect", "accept-encoding",
+    ])
+
+
+    def maybe_json(raw):
+        """Devuelve dict/list si el body es JSON; si no, el texto crudo."""
+        if not raw:
+            return ""
+        text = raw.decode("utf-8", "replace")
+        try:
+            return json.loads(text)
+        except ValueError:
+            return text
+
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "cascade-bff"
+        sys_version = ""
+
+        def log_message(self, fmt, *args):
+            print("%s %s" % (self.client_address[0], fmt % args), flush=True)
+
+        def _read_body(self):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = 0
+            return self.rfile.read(n) if n > 0 else b""
+
+        def _local_echo(self, body):
+            parsed = urllib.parse.urlsplit(self.path)
+            cookies = {}
+            for chunk in (self.headers.get("Cookie") or "").split(";"):
+                if "=" in chunk:
+                    k, v = chunk.split("=", 1)
+                    cookies[k.strip()] = v.strip()
+            fwd = self.headers.get("X-Forwarded-For") or ""
+            echo = {
+                "hop": HOP_NAME,
+                "host": {
+                    "hostname": socket.gethostname(),
+                    "ip": self.client_address[0],
+                    "ips": [p.strip() for p in fwd.split(",") if p.strip()],
+                },
+                "http": {
+                    "method": self.command,
+                    "originalUrl": self.path,
+                    "path": parsed.path,
+                    "protocol": self.headers.get("X-Forwarded-Proto", "http"),
+                },
+                "request": {
+                    "query": dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)),
+                    "cookies": cookies,
+                    "body": maybe_json(body),
+                    "headers": dict((k.lower(), v) for k, v in self.headers.items()),
+                },
+            }
+            if ENABLE_ENVIRONMENT:
+                echo["environment"] = dict(os.environ)
+            return echo
+
+        def _call_upstream(self, body, depth):
+            parsed = urllib.parse.urlsplit(self.path)
+            url = UPSTREAM_URL
+            if UPSTREAM_KEEP_PATH:
+                url += parsed.path
+                if parsed.query:
+                    url += "?" + parsed.query
+
+            out = {}
+            for k, v in self.headers.items():
+                low = k.lower()
+                if low in HOP_BY_HOP or low in STRIP_HEADERS:
+                    continue
+                out[k] = v
+            # Trazabilidad de la cascada. X-Echo-Depth también corta los ciclos.
+            out["X-Echo-Depth"] = str(depth + 1)
+            via = self.headers.get("X-Cascade-Via")
+            out["X-Cascade-Via"] = (via + "," + HOP_NAME) if via else HOP_NAME
+
+            result = {"url": url, "requestHeaders": out}
+            req = urllib.request.Request(
+                url, data=(body or None), method=self.command, headers=out
+            )
+            started = time.time()
+            try:
+                with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
+                    result["status"] = resp.status
+                    result["headers"] = dict((k.lower(), v) for k, v in resp.headers.items())
+                    result["body"] = maybe_json(resp.read())
+            except urllib.error.HTTPError as err:
+                # 4xx/5xx del upstream: es una respuesta válida, no un error de red.
+                result["status"] = err.code
+                result["headers"] = dict((k.lower(), v) for k, v in (err.headers or {}).items())
+                result["body"] = maybe_json(err.read())
+            except Exception as err:
+                # DNS, TCP, TLS, timeout, política de Kuadrant que cierra la conexión...
+                result["status"] = None
+                result["error"] = "%s: %s" % (type(err).__name__, err)
+            result["latencyMs"] = round((time.time() - started) * 1000, 1)
+            return result
+
+        def _respond(self, status, payload):
+            raw = json.dumps(payload, indent=2, default=str, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("X-Cascade-Hop", HOP_NAME)
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _handle(self):
+            body = self._read_body()
+            path = urllib.parse.urlsplit(self.path).path
+            # Las probes no encadenan: si no, un upstream caído marca NotReady este hop.
+            if path in ("/healthz", "/readyz"):
+                self._respond(200, {"status": "ok", "hop": HOP_NAME})
+                return
+
+            try:
+                depth = int(self.headers.get("X-Echo-Depth") or 0)
+            except ValueError:
+                depth = 0
+            skip = (self.headers.get("X-Cascade-Skip") or "").strip().lower() in ("1", "true")
+
+            payload = self._local_echo(body)
+            status = 200
+            if UPSTREAM_URL and not skip and depth < MAX_DEPTH:
+                up = self._call_upstream(body, depth)
+                payload["upstream"] = up
+                if up.get("status") is None:
+                    status = UPSTREAM_ERROR_STATUS
+                elif MIRROR_UPSTREAM_STATUS:
+                    status = up["status"]
+            elif UPSTREAM_URL:
+                payload["upstream"] = {
+                    "skipped": True,
+                    "reason": "x-cascade-skip" if skip else "max-depth",
+                    "depth": depth,
+                }
+            self._respond(status, payload)
+
+        do_GET = _handle
+        do_POST = _handle
+        do_PUT = _handle
+        do_PATCH = _handle
+        do_DELETE = _handle
+
+
+    if __name__ == "__main__":
+        print(
+            "cascade-bff hop=%s port=%d upstream=%s" % (HOP_NAME, PORT, UPSTREAM_URL or "(ninguno)"),
+            flush=True,
+        )
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -1,0 +1,61 @@
+# FASE 2 — Reparto por peso. Acá empiezan a cruzar usuarios reales.
+#
+# Escalera sugerida (editar los dos `weight` y reaplicar; 24-48h por escalón en
+# producción, menos en entornos bajos):
+#
+#     local / remoto      % que cruza
+#     99 / 1                   1%
+#     95 / 5                   5%
+#     75 / 25                 25%
+#     50 / 50                 50%
+#      0 / 100               100%   <- equivale a 03-httproute-egress.yaml
+#
+# Los pesos son relativos, no tienen que sumar 100.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-server2
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/fase: "2-pesos"
+    poc.galicia.io/reparto: "95/5"
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "server2.echoserver.svc.cluster.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server2-local
+          port: 8080
+          weight: 95
+        - group: networking.istio.io
+          kind: Hostname
+          name: app2.paas-demo.bancogalicia.com.ar
+          port: 443
+          weight: 5
+---
+# Criterio para avanzar de escalón: durante la ventana completa, el error rate y
+# el p99 medidos en el cliente no empeoran respecto del escalón anterior.
+#
+# ROLLBACK INSTANTÁNEO (sin rollout de pods, sin tocar el Service):
+#   oc -n echoserver patch httproute egress-server2 --type json -p \
+#     '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":100},
+#       {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":0}]'
+#
+# Precondición que habilita esta fase (verificar ANTES, ver README §6bis):
+#   durante el reparto hay dos instancias vivas de server2. Ambas tienen que
+#   llegar a los mismos backing stores y tolerar escrituras concurrentes, y
+#   server2 no puede tener estado en memoria: el reparto es por request, no
+#   pegajoso. Si algo de eso no se cumple, saltear la fase 2 y migrar con ventana.
+#
+# Verificar en cluster que Istio acepte `weight` sobre un backendRef kind: Hostname:
+#   oc -n echoserver get httproute egress-server2 \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="ResolvedRefs")].message}{"\n"}'
+# Si no lo soporta, el fallback es un VirtualService nativo con weight.

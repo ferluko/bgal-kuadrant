@@ -1,0 +1,29 @@
+# Cluster DESTINO — opcional. Requiere la Opción B (Kuadrant en el destino), que es
+# el camino recomendado. Con la Opción A (13a, validación por Istio) no hay
+# `auth.identity` que contar: el equivalente sería un contador de Envoy sobre
+# `request.auth.claims`, fuera del alcance de esta PoC.
+#
+# Cuota por origen, usando los claims del JWT.
+#
+# Demuestra el valor de llevar identidad en el token: el contador es por
+# cluster+namespace de origen, no por IP (que en cross-cluster es la del F5/SNAT
+# y agruparía todo en un mismo bucket).
+apiVersion: kuadrant.io/v1
+kind: RateLimitPolicy
+metadata:
+  name: server2-rlp
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: server2
+  limits:
+    "por-origen":
+      rates:
+        - limit: 100
+          window: 10s
+      counters:
+        - expression: auth.identity.src_cluster + "/" + auth.identity.src_namespace
+---
+# Para la demo de 429, bajar limit a 5 y disparar 6 requests en <10s.

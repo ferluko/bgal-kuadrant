@@ -1,0 +1,50 @@
+# FASE 3 (opcional) — Reparto por criticidad en vez de por porcentaje.
+#
+# Manda las LECTURAS (GET) al destino y deja las escrituras en local. Es un eje
+# más defendible ante riesgos que un porcentaje ciego: lo idempotente y sin efecto
+# de lado cruza primero, y las operaciones que mutan estado quedan para el final.
+#
+# Se puede usar en lugar de la fase 2, o combinada: GET al 100% remoto mientras
+# los POST/PUT recién van al 5%.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-server2
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/fase: "3-por-metodo"
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "server2.echoserver.svc.cluster.local"
+  rules:
+    - name: lecturas-remoto
+      matches:
+        - method: GET
+          path:
+            type: PathPrefix
+            value: /
+        - method: HEAD
+          path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: networking.istio.io
+          kind: Hostname
+          name: app2.paas-demo.bancogalicia.com.ar
+          port: 443
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server2-local
+          port: 8080
+---
+# Variante combinada: agregar weight a los backendRefs de la rule `default` para
+# ir moviendo también las escrituras, manteniendo las lecturas al 100% remoto.
+#
+# Rollback: borrar la rule `lecturas-remoto`.

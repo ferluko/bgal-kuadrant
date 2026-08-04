@@ -1,0 +1,45 @@
+# Cluster ORIGEN — puerta de entrada de la PoC. Ya validado en el runbook de ingress §6.1.
+#
+#   cliente --> F5 --> gw-hostnet (Envoy hostNetwork, infra-3/4/5) --> server --> server2
+#                      app1.paas-demo.bancogalicia.com.ar
+#
+# Es lo que hace la PoC demostrable de punta a punta: se le pega a app1 desde afuera y
+# el salto interno server -> server2 es el que se migra al cluster EKS.
+#
+# El Gateway vive en `connlink-ingress` y este HTTPRoute en `echoserver`: lo habilita el
+# `allowedRoutes: {namespaces: {from: All}}` del listener. No hace falta ReferenceGrant
+# para route -> Gateway (sólo para backendRefs cruzando namespaces y para certificateRefs).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app1
+  namespace: echoserver
+spec:
+  parentRefs:
+    - name: gw-hostnet
+      namespace: connlink-ingress
+  hostnames:
+    - "app1.paas-demo.bancogalicia.com.ar"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server
+          port: 8080
+---
+# Sin `sectionName`, engancha en todos los listeners compatibles del Gateway.
+#
+# Estado del TLS en ese gateway: el listener 443 bindea pero el certificado no llega por
+# SDS (bloqueo abierto, runbook de ingress §7.2). Mientras siga así, app1 se publica con
+# TLS terminado en el F5 y pool a <IPs de nodo>:80. No afecta a esta PoC: el JWT de egreso
+# y su validación son independientes de dónde termine el TLS de entrada.
+#
+# Verificación:
+#   oc -n echoserver get httproute app1 \
+#     -o jsonpath='{range .status.parents[*]}{.parentRef.name}{": "}{range .conditions[*]}{.type}={.status} {end}{"\n"}{end}'
+#   for ip in 10.254.28.68 10.254.28.62 10.254.28.63; do
+#     curl -sS -o /dev/null -w "$ip -> %{http_code}\n" \
+#       -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://$ip/ --max-time 5
+#   done

@@ -1,0 +1,135 @@
+# OPCIONAL — cascada de 3+ niveles: bastión -> server -> server2b -> server3.
+#
+# El mismo ConfigMap `cascade-bff` sirve para cualquier hop. Con `UPSTREAM_URL` vacío el
+# BFF es un echo terminal (equivalente funcional al echo-server, misma forma de JSON);
+# con `UPSTREAM_URL` seteado, encadena. Así se arma la profundidad que haga falta:
+#
+#   server (UPSTREAM_URL=server2b) --> server2b (UPSTREAM_URL=server3) --> server3 (sin upstream)
+#
+# En la respuesta al bastión quedan anidados: .upstream.body.upstream.body
+# MAX_DEPTH (default 5) corta el ciclo si alguien deja un upstream apuntando hacia atrás.
+#
+# NO aplicar junto con 01/02 sin repuntar UPSTREAM_URL del hop 1 a `server2b`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server2b
+  namespace: echoserver
+  labels:
+    app: server2b
+    poc.galicia.io/rol: cascada-hop2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server2b
+  template:
+    metadata:
+      labels:
+        app: server2b
+        poc.galicia.io/rol: cascada-hop2
+    spec:
+      containers:
+        - name: bff
+          image: registry.access.redhat.com/ubi9/python-312:1
+          command: ["python3", "/opt/cascade/bff.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOP_NAME
+              value: server2b
+            - name: UPSTREAM_URL
+              value: http://server3.echoserver.svc.cluster.local:8080
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          volumeMounts:
+            - { name: bff, mountPath: /opt/cascade, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: bff
+          configMap: { name: cascade-bff }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2b
+  namespace: echoserver
+  labels: { app: server2b }
+spec:
+  type: ClusterIP
+  selector: { app: server2b }
+  ports:
+    - { name: server-port, port: 8080, targetPort: 8080, protocol: TCP }
+---
+# Hop terminal: mismo BFF, SIN UPSTREAM_URL. Podría ser también un ealen/echo-server.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server3
+  namespace: echoserver
+  labels:
+    app: server3
+    poc.galicia.io/rol: cascada-hop3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server3
+  template:
+    metadata:
+      labels:
+        app: server3
+        poc.galicia.io/rol: cascada-hop3
+    spec:
+      containers:
+        - name: bff
+          image: registry.access.redhat.com/ubi9/python-312:1
+          command: ["python3", "/opt/cascade/bff.py"]
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: HOP_NAME, value: server3 }
+            # Sin UPSTREAM_URL => echo terminal.
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          volumeMounts:
+            - { name: bff, mountPath: /opt/cascade, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: bff
+          configMap: { name: cascade-bff }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server3
+  namespace: echoserver
+  labels: { app: server3 }
+spec:
+  type: ClusterIP
+  selector: { app: server3 }
+  ports:
+    - { name: server-port, port: 8080, targetPort: 8080, protocol: TCP }

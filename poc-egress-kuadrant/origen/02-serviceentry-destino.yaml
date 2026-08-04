@@ -1,0 +1,49 @@
+# Cluster ORIGEN — registro del endpoint remoto en el service registry de Istio.
+#
+# Sin esto el gateway de egreso no puede tener un backendRef hacia un host
+# externo al cluster.
+#
+# IMPORTANTE: el puerto 443 se declara con protocol: HTTP a propósito.
+# Es el patrón oficial de "TLS origination en el egress gateway": Envoy rutea a
+# nivel L7 (necesario para el HTTPRoute y para inyectar el header con el JWT) y
+# el upgrade a TLS lo hace el DestinationRule de 04-destinationrule-tls.yaml.
+# Si se declarara HTTPS, el tráfico sería TCP opaco y no habría inyección posible.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: server2-destino
+  namespace: echoserver
+spec:
+  hosts:
+    # <<< PLACEHOLDER: FQDN público del gateway del cluster destino
+    - "app2.paas-demo.bancogalicia.com.ar"
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 443
+      name: http-for-tls-origination
+      protocol: HTTP
+      targetPort: 443
+---
+# Pre-requisitos de red — EL DESTINO ES EKS, así que esto no es trámite:
+#
+#  1. **DNS.** app2.paas-demo.bancogalicia.com.ar es un CNAME al NLB de EKS. Con NLB
+#     `internal` el nombre resuelve a IPs privadas de la VPC: el DNS corporativo tiene
+#     que resolver la zona de AWS (forwarding a Route53 Resolver o zona privada
+#     compartida). Verificarlo DESDE UN POD del cluster origen, no desde el bastión:
+#     el resolver del pod es CoreDNS, que reenvía a los upstreams del nodo.
+#
+#  2. **Ruteo.** Tiene que haber camino L3 hacia la VPC: Direct Connect o VPN.
+#
+#  3. **Proxy corporativo.** Si la salida obligatoria es por proxy HTTP, este patrón
+#     NO funciona tal cual: Envoy originaría TLS directo. O se pide excepción para el
+#     rango del NLB, o se configura el egress gateway con un upstream proxy (más
+#     piezas, y el proxy vería el SNI). Definirlo antes de avanzar.
+#
+# Chequeo desde un pod del cluster origen (no `oc debug`, que en este cluster falla por
+# admission — ver runbook de ingress §9):
+#   oc -n echoserver run neteste --rm -it --restart=Never \
+#     --image=registry.access.redhat.com/ubi9/ubi-minimal -- sh -c '
+#       getent hosts app2.paas-demo.bancogalicia.com.ar;
+#       curl -sS -o /dev/null -w "%{http_code}\n" --max-time 5 \
+#         https://app2.paas-demo.bancogalicia.com.ar/'

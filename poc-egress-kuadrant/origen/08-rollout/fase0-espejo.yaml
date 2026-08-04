@@ -1,0 +1,55 @@
+# FASE 0 — Espejo. Cero impacto para el usuario.
+#
+# El 100% del tráfico se sirve desde los pods LOCALES; una copia de cada request
+# se envía al cluster destino y su respuesta se descarta. Valida la cadena
+# completa (TLS origination, firma del JWT, red, app en destino) con tráfico real.
+#
+# APLICAR ANTES DEL CUTOVER (09): así, cuando el Service pase a apuntar al
+# gateway, el camino cambia pero el destino sigue siendo local.
+#
+# ADVERTENCIAS:
+#  - El espejo DUPLICA ESCRITURAS. Sólo apto si el tráfico es idempotente o si el
+#    server2 del destino escribe contra un backing store separado.
+#  - Istio no soporta mirror.percent en Gateway API (istio#49999): el espejo es
+#    100% del tráfico y duplica la carga sobre el destino. Dimensionar antes.
+#  - Verificar que el header x-egress-token viaje también en la copia espejada
+#    (la AuthPolicy corre antes del router, debería; confirmarlo en los logs del
+#    destino: requests con 200, no 401).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-server2
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/fase: "0-espejo"
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "server2.echoserver.svc.cluster.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestMirror
+          requestMirror:
+            backendRef:
+              group: networking.istio.io
+              kind: Hostname
+              name: app2.paas-demo.bancogalicia.com.ar
+              port: 443
+      backendRefs:
+        - name: server2-local
+          port: 8080
+---
+# Criterio para avanzar a la fase 1:
+#  - En el DESTINO: mismo volumen de requests que en el origen, 0 respuestas 401
+#    de la AuthPolicy, error rate de la app ≈ el del origen.
+#  - En el ORIGEN: p99 del cliente sin cambio (el espejo no debe bloquear).
+#
+# Rollback: reaplicar sin el bloque filters (o volver a 03-httproute-egress.yaml
+# si todavía no se hizo el cutover).

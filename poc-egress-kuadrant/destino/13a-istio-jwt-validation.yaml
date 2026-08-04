@@ -1,0 +1,80 @@
+# Cluster DESTINO (EKS) — OPCIÓN A: validar el JWT con Istio, sin Kuadrant.
+#
+# NO es el camino recomendado. La enmienda 2026-08-04 del ADR de componentes upstream
+# (01_apim/ADR-kuadrant-rhcl-componentes-upstream.md §2bis) acepta Kuadrant upstream en
+# EKS, así que la Opción B (13b) pasó a ser la principal: mismo plano de políticas de los
+# dos lados y convergencia directa cuando salga RHCL/EKS en 2027.
+#
+# Esta opción queda documentada como la de **menor huella**, y es la elección correcta si:
+#  - no se quiere sumar el operador de Kuadrant al cluster EKS;
+#  - se prioriza minimizar piezas en el lado que menos se controla;
+#  - no hace falta rate limiting por claims en el destino.
+#
+# Ventajas propias: acepta **JWKS inline** (no hace falta destino/11-jwks-static.yaml) y
+# el destino sólo necesita el Istio que ya requiere para tener Gateway API.
+#
+# Lo que se pierde vs la Opción B: el plano de políticas queda partido (Kuadrant on-prem,
+# Istio en AWS), no alimenta los counters de `RateLimitPolicy` (destino/14), y no hay
+# camino de convergencia cuando RHCL/EKS esté disponible.
+#
+# Pre-requisito:
+#   kubectl get crd requestauthentications.security.istio.io gateways.gateway.networking.k8s.io
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: egress-origen
+  namespace: echoserver
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ingress-gw
+  jwtRules:
+    - issuer: "https://egress.paas-arqlab.bancogalicia.com.ar"
+      audiences: ["app2.paas-demo.bancogalicia.com.ar"]
+      fromHeaders:
+        - name: x-egress-token
+      forwardOriginalToken: true
+      # JWKS inline: pegar el contenido de keys/out/jwks.json en una línea.
+      # Es la clave PÚBLICA: se puede versionar en git sin problema.
+      jwks: |
+        {"keys":[{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"egress-echoserver-1","x":"<<<x>>>","y":"<<<y>>>"}]}
+---
+# RequestAuthentication NO rechaza requests sin token: sólo valida si viene.
+# El "deny" lo hace la AuthorizationPolicy. Sin esta segunda pieza, un request
+# sin x-egress-token pasaría derecho al backend.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-egress-token
+  namespace: echoserver
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ingress-gw
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            requestPrincipals:
+              - "https://egress.paas-arqlab.bancogalicia.com.ar/*"
+      when:
+        - key: request.auth.claims[src_cluster]
+          values: ["paas-arqlab"]
+        - key: request.auth.claims[src_namespace]
+          values: ["echoserver"]
+        - key: request.auth.claims[dst_service]
+          values: ["server2"]
+---
+# Verificación:
+#   kubectl -n echoserver get requestauthentication egress-origen -o yaml
+#   # sin token -> 403 "RBAC: access denied"
+#   curl -sS -o /dev/null -w '%{http_code}\n' https://app2.paas-demo.bancogalicia.com.ar/
+#
+# Nota sobre HS256 / secreto simétrico:
+#   Envoy (y por lo tanto esta ruta Istio) SÍ soporta HMAC con un JWKS de tipo
+#   {"kty":"oct","alg":"HS256","k":"<secreto base64url>"}. El bloqueo está del lado
+#   emisor: Authorino no firma HS256 (ver README §2). Para usar secreto simétrico
+#   habría que agregar un firmador propio en el origen — más piezas, el secreto
+#   replicado en ambos clusters, y sin la asimetría que hace seguro el esquema actual.

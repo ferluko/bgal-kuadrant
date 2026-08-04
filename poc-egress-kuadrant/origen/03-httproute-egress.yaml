@@ -1,0 +1,49 @@
+# Cluster ORIGEN — ruta de egreso (estado base: 100% al cluster destino).
+#
+# Matchea el hostname interno que el cliente sigue usando sin cambios
+# (server2.echoserver.svc.cluster.local) y lo reenvía al FQDN del destino.
+#
+# NO hay filtro URLRewrite del Host, a propósito:
+#   En cuanto la rule tiene dos backends (local y remoto, ver 08-rollout-progresivo.yaml)
+#   un filtro a nivel rule aplicaría a los dos, e Istio no soporta filtros a nivel
+#   de backendRef (istio#39136). Por eso el Host viaja sin reescribir y el gateway
+#   del destino acepta el hostname interno. El ruteo por el F5 y la selección de
+#   certificado no se ven afectados: el SNI lo fija el DestinationRule (04),
+#   independiente del header Host.
+#
+# Este archivo es el que se aplica en la ETAPA A para probar la cadena end-to-end
+# a mano. Antes del cutover (09) hay que pasar a la fase 0 de 08-rollout-progresivo.yaml.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-server2
+  namespace: echoserver
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "server2.echoserver.svc.cluster.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # backendRef a un host externo: extensión de Istio para Gateway API.
+        - group: networking.istio.io
+          kind: Hostname
+          name: app2.paas-demo.bancogalicia.com.ar
+          port: 443
+---
+# Verificación:
+#   oc -n echoserver get httproute egress-server2 \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
+#   -> "Route was valid"
+#
+# Si el controller rechaza `kind: Hostname` como backendRef, el fallback es un
+# Service ExternalName hacia el FQDN del destino usado como backendRef, o un
+# VirtualService nativo. Verificar con:
+#   oc -n echoserver get httproute egress-server2 \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="ResolvedRefs")].message}{"\n"}'

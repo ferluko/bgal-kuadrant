@@ -1,0 +1,37 @@
+# Cluster ORIGEN — Service ADITIVO hacia los pods reales de server2.
+#
+# No modifica nada existente: crea un segundo Service que selecciona exactamente
+# los mismos pods que hoy selecciona `server2`. El Deployment server2 NO se toca:
+# sigue corriendo con sus labels originales.
+#
+# Es el backend "viejo" del canary. Una vez que el Service `server2` pase a apuntar
+# al gateway de egreso (09), este es el único camino para volver a los pods locales,
+# y es el backendRef local de las fases de 08-rollout-progresivo.yaml.
+#
+# APLICAR EN LA ETAPA A, antes del cutover.
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2-local
+  namespace: echoserver
+  labels:
+    poc.galicia.io/rol: backend-local-canary
+spec:
+  type: ClusterIP
+  # Idéntico al selector actual del Service server2 (verificado en paas-arqlab:
+  # {"app":"server2"}), para que seleccione exactamente los mismos pods.
+  selector:
+    app: server2
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Verificación — tiene que devolver las MISMAS IPs que el Service server2 actual:
+#   oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2-local \
+#     -o jsonpath='{.items[*].endpoints[*].addresses[*]}{"\n"}'
+#   oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2 \
+#     -o jsonpath='{.items[*].endpoints[*].addresses[*]}{"\n"}'
+#
+# Si difieren, el selector está mal y el canary mandaría tráfico a ningún lado.

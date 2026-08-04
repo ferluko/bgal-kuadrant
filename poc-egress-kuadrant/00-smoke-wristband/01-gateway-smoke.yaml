@@ -1,0 +1,53 @@
+# SMOKE TEST — Gateway efímero, aislado del resto de la PoC.
+#
+# HTTP en 8080, hostname inventado: no toca ningún Service ni DNS existente.
+# Se borra entero al terminar (ver README del smoke test).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: smoke-gw
+  namespace: echoserver
+  labels:
+    kuadrant.io/gateway: "true"
+  annotations:
+    # Sin esto el controller genera un Service LoadBalancer que en este cluster
+    # queda EXTERNAL-IP <pending> para siempre (no hay proveedor de LB) y además
+    # asigna nodePorts. Sólo se necesita alcanzarlo desde adentro del cluster.
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8080
+      hostname: "smoke.egress.local"
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Verificar antes de seguir:
+#   oc -n echoserver get gateway smoke-gw \
+#     -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}{"\n"}'
+#   oc -n echoserver get svc -l gateway.networking.k8s.io/gateway-name=smoke-gw
+#
+# El nombre del Service generado (esperado: smoke-gw-openshift-default) es el
+# endpoint contra el que se hacen los curl del test.
+#
+# Con TYPE=ClusterIP, `Programmed` queda en True limpio.
+# Si el Service sigue saliendo LoadBalancer, la annotation no la está tomando este
+# controller; el otro camino es infrastructure.parametersRef:
+#
+#   spec:
+#     infrastructure:
+#       parametersRef: {group: "", kind: ConfigMap, name: smoke-gw-options}
+#   ---
+#   apiVersion: v1
+#   kind: ConfigMap
+#   metadata: {name: smoke-gw-options, namespace: echoserver}
+#   data:
+#     service: |
+#       spec:
+#         type: ClusterIP
+#
+# Y si ninguno funciona, el smoke test corre igual: ver README del smoke test §"LoadBalancer
+# pendiente". Lo que NO es negociable es dejar el gateway de EGRESO como LoadBalancer.

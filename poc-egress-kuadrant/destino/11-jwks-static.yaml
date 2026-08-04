@@ -1,0 +1,85 @@
+# Cluster DESTINO — clave pública pineada, servida localmente.
+#
+# NECESARIO PARA LA OPCIÓN B (13b, validación con Kuadrant/Authorino), que es el
+# camino recomendado. Con la Opción A (13a, Istio) el JWKS va inline en el
+# RequestAuthentication y este Deployment no hace falta.
+#
+# Authorino valida JWT vía OIDC discovery (issuerUrl) o vía jwksUrl; no acepta
+# JWKS inline. Para NO depender de conectividad hacia el cluster origen, se
+# publica el JWKS dentro del propio cluster destino desde un ConfigMap.
+# Efecto práctico: clave preacordada, cero dependencia cross-cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jwks-egress-origen
+  namespace: echoserver
+data:
+  jwks.json: |
+    {
+      "keys": [
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "alg": "ES256",
+          "use": "sig",
+          "kid": "egress-echoserver-1",
+          "x": "<<< PEGAR x DE keys/out/jwks.json >>>",
+          "y": "<<< PEGAR y DE keys/out/jwks.json >>>"
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwks-egress
+  namespace: echoserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: jwks-egress}
+  template:
+    metadata:
+      labels: {app: jwks-egress}
+    spec:
+      containers:
+        - name: httpd
+          image: registry.access.redhat.com/ubi9/httpd-24:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: jwks
+              mountPath: /var/www/html
+              readOnly: true
+          readinessProbe:
+            httpGet: {path: /jwks.json, port: 8080}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - name: jwks
+          configMap:
+            name: jwks-egress-origen
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwks-egress
+  namespace: echoserver
+spec:
+  selector: {app: jwks-egress}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Verificación:
+#   oc -n echoserver run curl --rm -it --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+#     curl -s http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+#
+# Alternativa sin este Deployment: validar el JWT con Istio RequestAuthentication,
+# que sí acepta JWKS inline -> ver destino/13a-istio-jwt-validation.yaml

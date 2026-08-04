@@ -1,0 +1,89 @@
+# HOP 2 — `server2`, el backend. Echo-Server de Ealenn, sin adaptar.
+#
+# Acá el echo-server puro es exactamente lo que querés: es el extremo de la cascada y
+# devuelve crudo TODO lo que le llegó — headers (incluido el `x-egress-token` que inyecta
+# la AuthPolicy de la PoC de egreso), IP de origen, query, body, cookies. El BFF del hop 1
+# se lo cuelga entero abajo de `.upstream.body`.
+#
+# Si `server2` ya existe en el cluster, NO hace falta aplicar esto: el manifiesto está
+# para dejar documentada la config con la que se probó (sobre todo PORT=8080).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server2
+  namespace: echoserver
+  labels:
+    app: server2
+    poc.galicia.io/rol: cascada-hop2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server2
+  template:
+    metadata:
+      labels:
+        app: server2
+        poc.galicia.io/rol: cascada-hop2
+    spec:
+      containers:
+        - name: echo-server
+          # docker.io/ealen/echo-server — vía la cache pull-through de Quay (ADR-0002).
+          image: docker.io/ealen/echo-server:0.9.2
+          env:
+            # El default de la imagen es 80 y en OpenShift (restricted-v2, UID arbitrario)
+            # no puede bindear puerto privilegiado. 8080 es obligatorio, no cosmético.
+            - name: PORT
+              value: "8080"
+            - name: LOGS__IGNORE__PING
+              value: "true"
+            # OBLIGATORIO para saber QUÉ POD contestó, y no es obvio: en la salida de
+            # echo-server `.host.hostname` es el **header Host** del request y `.host.ip`
+            # es la IP del cliente — no identifican al pod que atendió (verificado contra
+            # ealen/echo-server:0.9.2, ver README §6). El único dato del pod es
+            # `.environment.HOSTNAME`, y sólo aparece con este flag en true.
+            #
+            # A cambio expone TODO el env del pod. Aceptable acá porque server2 no recibe
+            # Secrets por env. Si algún día los recibe: montarlos como archivo, o volver
+            # esto a "false" y perder la identificación del pod.
+            - name: ENABLE__ENVIRONMENT
+              value: "true"
+            - name: ENABLE__FILE
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2
+  namespace: echoserver
+  labels:
+    app: server2
+spec:
+  type: ClusterIP
+  # OJO: la PoC de egreso (origen/09-cutover-service-selector.yaml) le cambia este
+  # selector para apuntar al gateway de egreso. Ese es el punto de corte de la migración.
+  selector:
+    app: server2
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

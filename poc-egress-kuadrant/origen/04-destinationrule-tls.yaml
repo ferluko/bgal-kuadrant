@@ -1,0 +1,47 @@
+# Cluster ORIGEN — TLS origination en el gateway de egreso.
+#
+# La app manda HTTP plano; el gateway abre TLS contra el cluster destino.
+# Esto es lo que hace que el "salto entre clusters" viaje cifrado sin tocar
+# una línea de código de server.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: server2-destino-tls
+  namespace: echoserver
+spec:
+  # <<< PLACEHOLDER: mismo FQDN que el ServiceEntry
+  host: app2.paas-demo.bancogalicia.com.ar
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 443
+        tls:
+          mode: SIMPLE
+          sni: app2.paas-demo.bancogalicia.com.ar
+          # QUÉ CA VA ACÁ depende de dónde termine el TLS en el destino:
+          #
+          #   NLB en passthrough + Envoy termina con el wildcard del banco
+          #   (es lo que hace destino/10)          -> CA INTERNA del banco  <-- recomendado
+          #
+          #   ALB/NLB terminando con certificado de ACM
+          #                                        -> bundle público de Amazon
+          #
+          # La primera opción mantiene el mismo modelo de confianza que on-prem y no
+          # introduce una CA nueva; por eso destino/10 NO usa ACM.
+          #
+          # El Secret debe existir en el NAMESPACE DONDE CORREN LOS PODS DEL GATEWAY:
+          #   oc get pods -A -l gateway.networking.k8s.io/gateway-name=egress-gw
+          credentialName: destino-ca
+          # Sólo PoC, si todavía no tenés la CA a mano: comentar credentialName y
+          # descomentar la línea siguiente. NO dejarlo así para producción: sin
+          # validación de cadena, el TLS protege de escucha pasiva pero no de un MITM.
+          # insecureSkipVerify: true
+---
+# Creación del Secret con la CA:
+#   oc -n <ns-del-dataplane-del-gateway> create secret generic destino-ca \
+#     --from-file=ca.crt=./ca-interna-galicia.pem
+#
+# El `sni` es lo que hace que todo esto funcione sin reescribir el Host: el request
+# viaja con Host: server2.echoserver.svc.cluster.local pero abre TLS anunciando
+# app2.paas-demo.bancogalicia.com.ar, que es lo que el NLB/Envoy del destino esperan
+# y lo que el certificado wildcard cubre.
