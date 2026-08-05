@@ -76,6 +76,21 @@ except Exception as e:
 PY
 }
 
+# Invalida la firma de un JWT de forma FIABLE.
+#
+# No sirve cambiar el último carácter (`${tok%?}X`): la firma RS256 son 256 bytes, y en
+# base64url sin padding el último carácter aporta sólo 2 bits significativos — los otros 4
+# son relleno que el decodificador descarta. El token "alterado" decodifica a los MISMOS
+# bytes y el destino lo acepta con toda razón. Pasó el 2026-08-05: la prueba negativa (b)
+# daba 200 y parecía un agujero de seguridad, cuando el agujero estaba en el test.
+# Mutando en el medio de la firma siempre cambia un byte real.
+alterar_firma() {
+  local t="$1" h p s c
+  h=${t%%.*}; s=${t##*.}; p=${t#*.}; p=${p%.*}
+  c=${s:10:1}; if [[ "$c" == "A" ]]; then c=B; else c=A; fi
+  printf '%s.%s.%s' "$h" "$p" "${s:0:10}$c${s:11}"
+}
+
 # Detecta la fase canary por el HEADER MATCH, no por `rules[].name`.
 #
 # Medido en paas-arqlab (2026-08-04): `spec.rules[].name` es un campo reciente de Gateway
@@ -196,7 +211,7 @@ else
   if [[ -n "${SIMIP:-}" ]]; then
     eq "(a) sin token -> 401"            "$(directo_al_destino "$SIMIP")"                 "401"
     eq "     token válido -> 200"        "$(directo_al_destino "$SIMIP" "$TOKEN")"        "200"
-    eq "(b) firma alterada -> 401"       "$(directo_al_destino "$SIMIP" "${TOKEN%?}X")"   "401"
+    eq "(b) firma alterada -> 401"       "$(directo_al_destino "$SIMIP" "$(alterar_firma "$TOKEN")")" "401"
     eq "(b) token basura -> 401"         "$(directo_al_destino "$SIMIP" "no-es-un-jwt")"  "401"
   else
     skip "pruebas directas al destino" "no se pudo leer la ClusterIP del gateway simulado"

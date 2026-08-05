@@ -1,0 +1,9 @@
+# Material de clave: la privada NUNCA se versiona (keys/.gitignore ya cubre keys/out).
+sim-destino/out/
+*.pem
+*.key
+
+# Basura de edición y de python que se coló más de una vez en los commits.
+*.bak
+__pycache__/
+*.pyc
