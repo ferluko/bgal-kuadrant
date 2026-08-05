@@ -56,13 +56,22 @@ paso "A1. Normalizar el JWKS y recrear el ConfigMap"
 
 JWKS="$DIR/../keys/out/jwks.json"
 [[ -f "$JWKS" ]] || { err "no existe $JWKS — correr keys/gen-signing-key.sh primero"; exit 1; }
-inf "clave publicada: $(jq -c '.keys[0] | {kid, kty, crv, alg, use}' "$JWKS")"
+inf "clave publicada: $(jq -c '.keys[0] | {kid, kty, alg, use}' "$JWKS")"
 
-# `alg` y `use` son opcionales en el RFC pero el verificador de Authorino descarta las keys
-# que no los traen. La plantilla de destino/11 los pone explícitos; gen-signing-key.sh puede
-# no emitirlos. Se agregan sin pisar lo que ya esté.
-jq '.keys |= map({kty,crv,x,y,kid} + {alg:(.alg // "ES256"), use:(.use // "sig")})' "$JWKS" > /tmp/jwks-norm.json
-inf "normalizado:     $(jq -c '.keys[0] | {kid, alg, use}' /tmp/jwks-norm.json)"
+# `alg` y `use` son opcionales en el RFC pero conviene que estén explícitos. Se agregan sin
+# pisar lo que ya haya, y sin recortar campos: el JWK de RSA lleva n/e y el de EC crv/x/y.
+jq '.keys |= map(. + {alg:(.alg // "RS256"), use:(.use // "sig")})' "$JWKS" > /tmp/jwks-norm.json
+inf "normalizado:     $(jq -c '.keys[0] | {kid, kty, alg, use}' /tmp/jwks-norm.json)"
+
+# El verificador `jwt` de Authorino (go-oidc) SÓLO acepta RS256 — medido el 2026-08-05.
+# Con una clave EC el destino rechaza el 100% de los tokens con un 401 indistinguible de
+# "falta el token", y el AuthConfig igual queda Ready=True.
+if [[ "$(jq -r '.keys[0].kty' "$JWKS")" != "RSA" ]]; then
+  err "el JWKS es $(jq -r '.keys[0].kty' "$JWKS"), no RSA — Authorino va a rechazar TODOS los tokens"
+  inf "  regenerar con la versión actual del script y re-aplicar el Secret:"
+  inf "    ../keys/gen-signing-key.sh && oc apply -f ../keys/out/secret.yaml"
+  inf "  y confirmar que origen/05 y 00-smoke-wristband/04 digan 'algorithm: RS256'"
+fi
 
 oc -n "$NS_SIM" create configmap jwks-egress-origen --from-file=jwks.json=/tmp/jwks-norm.json \
   --dry-run=client -o yaml | oc apply -f - >/dev/null && ok "ConfigMap actualizado" || err "no se pudo actualizar el ConfigMap"

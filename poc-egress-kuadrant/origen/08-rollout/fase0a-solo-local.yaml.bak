@@ -25,7 +25,7 @@
 #
 # CONSECUENCIA A ASUMIR
 #   La AuthPolicy (05) targetea este HTTPRoute completo, así que el 100% del tráfico LOCAL pasa
-#   por ext_authz y se le firma un wristband RS256 que nadie valida (no hay destino). No es
+#   por ext_authz y se le firma un wristband ES256 que nadie valida (no hay destino). No es
 #   gratis: mete a Authorino en el camino crítico de una app que hoy no depende de él, y el
 #   ext_authz falla CERRADO. Por eso el cutover va en dos pasos: primero el selector sin
 #   AuthPolicy (mide el costo del Envoy), después la AuthPolicy (mide el costo de Authorino).
@@ -60,7 +60,7 @@ spec:
         # Service `server2` selecciona los pods del PROPIO gateway, así que apuntar acá a
         # `server2` produce un loop infinito Envoy <-> kube-proxy. Ningún contador de la app lo
         # frena: el MAX_DEPTH del BFF cuenta hops de aplicación y el ciclo ocurre entero por
-        # debajo. Cada vuelta además dispara una firma RS256 en Authorino.
+        # debajo. Cada vuelta además dispara una firma ES256 en Authorino.
         #
         # Sin `weight`: con un solo backendRef no aporta nada. Se agrega cuando aparezca el
         # segundo backend, en fase2-pesos.yaml.

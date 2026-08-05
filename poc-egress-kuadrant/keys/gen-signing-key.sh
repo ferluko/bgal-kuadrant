@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Genera el material de clave de la PoC:
-#   - out/key.pem        clave privada EC P-256 (queda SOLO en el cluster origen)
+#   - out/key.pem        clave privada RSA 2048 (queda SOLO en el cluster origen)
 #   - out/secret.yaml    Secret egress-echoserver-1 para el ns echoserver (ORIGEN)
 #   - out/jwks.json      JWKS con la clave PÚBLICA (se pinea en el cluster DESTINO)
 #
@@ -10,6 +10,24 @@
 #   sin IdP, sin dependencia de red entre clusters — pero al destino sólo se le
 #   copia la clave PÚBLICA: si el cluster destino se ve comprometido, nadie
 #   puede falsificar tokens de salida.
+#
+# POR QUÉ RSA Y NO EC — medido en paas-arqlab (2026-08-05), RHCL 1.x:
+#   El emisor de wristband de Authorino firma ES256 sin problemas, pero su propio
+#   verificador `jwt` (go-oidc) está fijado a RS256 y NO hay campo en la AuthPolicy
+#   para declarar otros algoritmos. Con una clave EC, el destino rechaza el 100% de
+#   los tokens y el log dice:
+#
+#     cannot validate identity ... reason:
+#       "oidc: malformed jwt: unexpected signature algorithm \"ES256\"; expected [\"RS256\"]"
+#
+#   El síntoma en el cliente es un 401 indistinguible de "falta el token", y el
+#   AuthConfig queda Ready=True, así que nada señala al algoritmo. Es una asimetría
+#   dentro del mismo producto: firma EC, valida sólo RSA.
+#
+#   Cambiar a RSA conserva TODO el modelo de confianza de §2 del README — asimétrico,
+#   privada sólo en el origen, público pineado en el destino. Sólo cambia el algoritmo.
+#   Si algún día el verificador acepta EC, volver a ES256 es cambiar este script y el
+#   `algorithm:` de los AuthPolicy; nada más del diseño depende de eso.
 #
 # DÓNDE VA EL SECRET — verificado en paas-arqlab (2026-08):
 #   Kuadrant traduce cada AuthPolicy a un AuthConfig en `kuadrant-system`, sin
@@ -30,21 +48,34 @@ OUT="$(cd "$(dirname "$0")" && pwd)/out"
 mkdir -p "$OUT"
 umask 077
 
-openssl ecparam -name prime256v1 -genkey -noout -out "$OUT/key.pem"
-openssl ec -in "$OUT/key.pem" -pubout -outform DER -out "$OUT/pub.der" 2>/dev/null
+openssl genrsa -out "$OUT/key.pem" 2048 2>/dev/null
+
+# El JWK RSA necesita el módulo (n) y el exponente (e) en base64url. Se leen del propio
+# PEM con openssl para no depender de librerías de criptografía en el bastión.
+openssl rsa -in "$OUT/key.pem" -noout -modulus 2>/dev/null | sed 's/^Modulus=//' > "$OUT/modulus.hex"
+openssl rsa -in "$OUT/key.pem" -noout -text 2>/dev/null | grep -A1 -i 'publicExponent' | head -1 \
+  | sed -E 's/.*\(0x([0-9a-fA-F]+)\).*/\1/' > "$OUT/exponent.hex"
 
 python3 - "$OUT" "$KID" <<'PY'
 import base64, json, sys
 out, kid = sys.argv[1], sys.argv[2]
-der = open(f"{out}/pub.der", "rb").read()
-point = der[-65:]                      # SubjectPublicKeyInfo P-256: ultimos 65 bytes
-assert point[0] == 0x04, "punto EC no comprimido esperado"
 b64u = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+n_hex = open(f"{out}/modulus.hex").read().strip()
+e_hex = open(f"{out}/exponent.hex").read().strip() or "10001"
+if len(e_hex) % 2:
+    e_hex = "0" + e_hex
+
+n = bytes.fromhex(n_hex)
+n = n.lstrip(b"\x00") or b"\x00"        # el JWK no lleva el byte de signo del DER
+e = bytes.fromhex(e_hex).lstrip(b"\x00") or b"\x01"
+
 jwk = {
-    "kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": kid,
-    "x": b64u(point[1:33]), "y": b64u(point[33:65]),
+    "kty": "RSA", "alg": "RS256", "use": "sig", "kid": kid,
+    "n": b64u(n), "e": b64u(e),
 }
 json.dump({"keys": [jwk]}, open(f"{out}/jwks.json", "w"), indent=2)
+print(f"  JWK RSA: n={len(n)*8} bits, e=0x{e.hex()}")
 PY
 
 # Secret para el cluster ORIGEN. Authorino espera la entrada "key.pem".
@@ -68,7 +99,7 @@ open(f"{out}/secret.yaml", "w").write(
 )
 PY
 
-rm -f "$OUT/pub.der"
+rm -f "$OUT/modulus.hex" "$OUT/exponent.hex"
 
 cat <<EOF
 

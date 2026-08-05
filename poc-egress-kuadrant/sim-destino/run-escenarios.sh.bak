@@ -162,7 +162,7 @@ ne  "wristband inyectado"                    "$TOKEN" "null"
 if [[ "$TOKEN" != "null" ]]; then
   d(){ printf '%s' "$1" | jq -R 'gsub("-";"+")|gsub("_";"/")| . + ("===="[0:(4-(length%4))%4]) | @base64d | fromjson'; }
   HDR=$(d "$(cut -d. -f1 <<<"$TOKEN")"); CLM=$(d "$(cut -d. -f2 <<<"$TOKEN")")
-  eq "  alg del token"        "$(f "$HDR" '.alg')" "RS256"
+  eq "  alg del token"        "$(f "$HDR" '.alg')" "ES256"
   eq "  claim iss"            "$(f "$CLM" '.iss')" "https://egress.paas-arqlab.bancogalicia.com.ar"
   eq "  claim aud"            "$(f "$CLM" '.aud')" "$FQDN"
   eq "  claim src_cluster"    "$(f "$CLM" '.src_cluster')" "paas-arqlab"

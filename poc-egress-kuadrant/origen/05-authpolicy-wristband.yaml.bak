@@ -53,7 +53,7 @@ spec:
                   value: server2
               signingKeyRefs:
                 - name: egress-echoserver-1
-                  algorithm: RS256
+                  algorithm: ES256
 ---
 # Verificación:
 #   oc -n echoserver get authpolicy egress-server2-jwt \

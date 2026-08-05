@@ -21,32 +21,55 @@ import sys
 import tempfile
 import time
 
-# SubjectPublicKeyInfo DER de una clave EC P-256, hasta el bit string del punto.
+# El wristband se firma con RSA/RS256 y no con EC — ver keys/gen-signing-key.sh: el
+# verificador `jwt` de Authorino sólo acepta RS256, así que la clave del PoC es RSA.
+# Se conserva el soporte de EC para poder validar tokens viejos.
 P256_SPKI_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+RSA_ALG_ID = bytes.fromhex("300d06092a864886f70d0101010500")   # rsaEncryption, params NULL
 
 
 def b64u(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def spki_pem(x: bytes, y: bytes) -> str:
-    """JWK (x, y) -> PEM de clave pública, sin dependencias."""
-    der = P256_SPKI_PREFIX + b"\x04" + x.rjust(32, b"\x00") + y.rjust(32, b"\x00")
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(b)]) + b
+
+
+def _der(tag: int, payload: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(payload)) + payload
+
+
+def _entero(b: bytes) -> bytes:
+    b = b.lstrip(b"\x00") or b"\x00"
+    if b[0] & 0x80:
+        b = b"\x00" + b          # el DER es con signo: 0x00 al frente si el MSB está en 1
+    return _der(0x02, b)
+
+
+def _pem(der: bytes) -> str:
     b = base64.b64encode(der).decode()
     cuerpo = "\n".join(b[i:i + 64] for i in range(0, len(b), 64))
     return f"-----BEGIN PUBLIC KEY-----\n{cuerpo}\n-----END PUBLIC KEY-----\n"
 
 
+def spki_pem(jwk) -> str:
+    """JWK -> PEM de clave pública, sin dependencias externas. RSA (n,e) o EC (x,y)."""
+    if jwk.get("kty") == "RSA":
+        rsa_pub = _der(0x30, _entero(b64u(jwk["n"])) + _entero(b64u(jwk["e"])))
+        bitstring = _der(0x03, b"\x00" + rsa_pub)
+        return _pem(_der(0x30, RSA_ALG_ID + bitstring))
+    x, y = b64u(jwk["x"]), b64u(jwk["y"])
+    return _pem(P256_SPKI_PREFIX + b"\x04" + x.rjust(32, b"\x00") + y.rjust(32, b"\x00"))
+
+
 def raw_a_der(raw: bytes) -> bytes:
     """Firma JWS ES256 (R||S de 64 bytes) -> SEQUENCE DER que entiende openssl."""
-    def entero(b):
-        b = b.lstrip(b"\x00") or b"\x00"
-        if b[0] & 0x80:
-            b = b"\x00" + b
-        return b"\x02" + bytes([len(b)]) + b
-
-    cuerpo = entero(raw[:32]) + entero(raw[32:])
-    return b"\x30" + bytes([len(cuerpo)]) + cuerpo
+    cuerpo = _entero(raw[:32]) + _entero(raw[32:])
+    return _der(0x30, cuerpo)
 
 
 def verificar_firma(jwk, firmado: bytes, sig: bytes):
@@ -57,9 +80,10 @@ def verificar_firma(jwk, firmado: bytes, sig: bytes):
         der = os.path.join(tmp, "sig.der")
         msg = os.path.join(tmp, "msg.bin")
         with open(pub, "w") as f:
-            f.write(spki_pem(b64u(jwk["x"]), b64u(jwk["y"])))
+            f.write(spki_pem(jwk))
         with open(der, "wb") as f:
-            f.write(raw_a_der(sig))
+            # RSA: la firma JWS ya es el bloque PKCS#1 crudo. EC: hay que re-encodearla.
+            f.write(sig if jwk.get("kty") == "RSA" else raw_a_der(sig))
         with open(msg, "wb") as f:
             f.write(firmado)
         r = subprocess.run(
@@ -103,8 +127,14 @@ def main():
 
     problemas = []
 
-    if header.get("alg") != "ES256":
-        problemas.append(f"alg={header.get('alg')!r}, se esperaba 'ES256'")
+    # RS256 y no ES256: el verificador `jwt` de Authorino sólo acepta RS256 (medido el
+    # 2026-08-05 en paas-arqlab). Un token ES256 se valida bien acá y el destino lo rechaza
+    # igual, con un 401 que no señala al algoritmo — por eso el chequeo es duro.
+    if header.get("alg") != "RS256":
+        problemas.append(
+            f"alg={header.get('alg')!r}, se esperaba 'RS256'"
+            " — con cualquier otro, Authorino rechaza el token en el destino"
+        )
 
     now = int(time.time())
     exp, iat = payload.get("exp"), payload.get("iat")

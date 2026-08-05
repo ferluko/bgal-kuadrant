@@ -56,9 +56,30 @@ para reconocerlo en destino. **Authorino no firma HS256** — el wristband sopor
 ES256/ES384/ES512 y RS256/384/512 — y su verificador JWT tampoco está pensado para HMAC.
 
 La PoC conserva tu modelo de confianza (clave preacordada, sin IdP, sin dependencia de red
-entre clusters) usando un par EC P-256: la **privada vive sólo en el cluster origen** y al destino
+entre clusters) usando un par **RSA 2048**: la **privada vive sólo en el cluster origen** y al destino
 se le copia únicamente el **JWKS público**, servido desde un ConfigMap local. Ganás además que un
 compromiso del cluster destino no permite falsificar tokens de salida.
+
+> **RSA y no EC — corregido el 2026-08-05, medido en `paas-arqlab` con RHCL 1.x.** El diseño
+> original usaba EC P-256 / ES256. No funciona: el emisor de wristband de Authorino firma
+> ES256 sin problemas, pero **su propio verificador `jwt` (go-oidc) está fijado a RS256** y no
+> hay campo en la `AuthPolicy` para declarar otros algoritmos. El destino rechaza el 100% de
+> los tokens, y sólo se ve con el log de Authorino en `debug`:
+>
+> ```
+> cannot validate identity ... reason:
+>   "oidc: malformed jwt: unexpected signature algorithm \"ES256\"; expected [\"RS256\"]"
+> ```
+>
+> Lo caro del caso es cómo se presenta: **401 indistinguible de "falta el token"**, el
+> `AuthConfig` en `Ready=True`, el `kid` coincidiendo y el JWKS sirviéndose bien. Nada apunta
+> al algoritmo. Es una asimetría dentro del mismo producto: firma EC, valida sólo RSA.
+>
+> El cambio no toca el modelo de confianza — sigue siendo asimétrico, con la privada sólo en
+> el origen. Cambia el algoritmo en `keys/gen-signing-key.sh`, el `algorithm:` de `origen/05`
+> y `00-smoke-wristband/04`, y el JWK pasa de `crv/x/y` a `n/e`. **Aplica igual al destino
+> real**: EKS validando con Kuadrant habría fallado exactamente así, y el síntoma habría
+> aparecido recién con los dos clusters montados.
 
 **Corrección sobre "local al ns"** (verificado en `paas-arqlab`): esa parte de tu planteo no es
 alcanzable con Kuadrant. El operador traduce cada `AuthPolicy` a un `AuthConfig` en
