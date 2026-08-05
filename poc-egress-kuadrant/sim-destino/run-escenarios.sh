@@ -76,6 +76,31 @@ except Exception as e:
 PY
 }
 
+# Detecta la fase canary por el HEADER MATCH, no por `rules[].name`.
+#
+# Medido en paas-arqlab (2026-08-04): `spec.rules[].name` es un campo reciente de Gateway
+# API y el CRD de este cluster NO lo tiene, así que el API server lo DESCARTA en silencio
+# al aplicar — `oc apply` sale bien y el campo no queda. Detectar la fase por el nombre de
+# la rule da siempre falso. El header match sí sobrevive.
+hay_canary() {
+  oc -n "$NS" get httproute egress-server2 \
+    -o jsonpath='{.spec.rules[*].matches[*].headers[*].name}' 2>/dev/null | grep -qi 'x-canary'
+}
+
+# Espera a que el status del HTTPRoute refleje la generación actual del spec. Sin esto se
+# leen condiciones de la fase ANTERIOR y un ResolvedRefs=True puede ser de otro backendRef.
+esperar_status() {
+  local g o
+  for _ in $(seq 1 15); do
+    g=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.metadata.generation}' 2>/dev/null)
+    o=$(oc -n "$NS" get httproute egress-server2 \
+          -o jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].observedGeneration}' 2>/dev/null)
+    [[ -n "$g" && "$g" == "$o" ]] && return 0
+    sleep 2
+  done
+  return 1
+}
+
 restaurar() {
   [[ -n "$FASE_PREVIA" ]] || return 0
   printf '\n%s>> restaurando el HTTPRoute al estado previo%s\n' "$D" "$Z"
@@ -185,14 +210,14 @@ esc "E3 — Canary por header" \
 if (( ! SIM )); then
   skip "escenario E3" "requiere el destino simulado (E2)"
 else
-  RULES=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.spec.rules[*].name}' 2>/dev/null)
-  if [[ "$RULES" != *canary* ]]; then aplicar_fase "$DIR/../origen/08-rollout/fase1-canary-header.yaml"; fi
+  hay_canary || aplicar_fase "$DIR/../origen/08-rollout/fase1-canary-header.yaml"
 
+  esperar_status || nota "el status del HTTPRoute no convergió en 30s; lo que sigue puede ser lectura vieja"
   RR=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}' 2>/dev/null)
   eq "backendRef kind:Hostname resuelve" "${RR:-null}" "True"
   nota "(primera vez que se ejercita kind:Hostname en este cluster; False => fallback de origen/03)"
 
-  if [[ "$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.spec.rules[*].name}' 2>/dev/null)" == *canary* ]]; then
+  if hay_canary; then
     C=$(req -H 'x-canary: true')
     eq "con x-canary -> destino"          "$(f "$C" '.upstream.body.environment.SIM_SITE')" "eks-sim"
     eq "con x-canary -> status"           "$(f "$C" '.upstream.status')" "200"
