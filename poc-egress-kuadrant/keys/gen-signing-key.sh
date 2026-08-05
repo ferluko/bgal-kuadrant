@@ -74,7 +74,26 @@ PY
     rm -f "$OUT/pub.der"
     ;;
   RS256)
+    # PKCS#1 (`BEGIN RSA PRIVATE KEY`), NO PKCS#8 — medido en paas-arqlab (2026-08-05).
+    #
+    # El enum del CRD acepta RS256 para `signingKeyRefs`, pero con una clave en PKCS#8
+    # Authorino falla al reconciliar con "invalid signing key algorithm" y deja el AuthConfig
+    # del EGRESO caído — o sea que tumba el camino de la app, no sólo la validación en
+    # destino. El indicio es que la clave EC que sí funciona sale en SEC1
+    # (`BEGIN EC PRIVATE KEY`): Authorino usa los parsers legacy por tipo, no PKCS#8.
+    #
+    # `openssl genrsa` emite PKCS#8 desde OpenSSL 3.x, así que hay que forzar el formato.
     openssl genrsa -out "$OUT/key.pem" 2048 2>/dev/null
+    if ! head -1 "$OUT/key.pem" | grep -q 'BEGIN RSA PRIVATE KEY'; then
+      openssl rsa -in "$OUT/key.pem" -traditional -out "$OUT/key.pkcs1.pem" 2>/dev/null \
+        && mv "$OUT/key.pkcs1.pem" "$OUT/key.pem"
+    fi
+    if head -1 "$OUT/key.pem" | grep -q 'BEGIN RSA PRIVATE KEY'; then
+      echo "  formato: PKCS#1 (BEGIN RSA PRIVATE KEY) — el que Authorino parsea"
+    else
+      echo "  AVISO: la clave quedó en $(head -1 "$OUT/key.pem"); Authorino puede rechazarla."
+      echo "         este openssl no soporta -traditional; convertir a mano a PKCS#1."
+    fi
     openssl rsa -in "$OUT/key.pem" -noout -modulus 2>/dev/null | sed 's/^Modulus=//' > "$OUT/modulus.hex"
     openssl rsa -in "$OUT/key.pem" -noout -text 2>/dev/null | grep -A1 -i 'publicExponent' | head -1 \
       | sed -E 's/.*\(0x([0-9a-fA-F]+)\).*/\1/' > "$OUT/exponent.hex"
@@ -93,7 +112,6 @@ json.dump({"keys": [jwk]}, open(f"{out}/jwks.json", "w"), indent=2)
 print(f"  JWK RSA: n={len(n)*8} bits, e=0x{e.hex()}")
 PY
     rm -f "$OUT/modulus.hex" "$OUT/exponent.hex"
-    echo "  AVISO: hoy Authorino NO firma RS256 — 'invalid signing key algorithm'."
     ;;
   *) echo "algoritmo no soportado: $ALG (usar ES256 o RS256)"; exit 2 ;;
 esac
