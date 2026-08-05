@@ -1,0 +1,34 @@
+# Destino SIMULADO — ruta al server2 remoto. Calcado de destino/12-httproute-server2.yaml.
+#
+# SIN `hostnames`, a propósito y por dos motivos que se refuerzan:
+#   1. El listener del Gateway (02) tampoco declara `hostname`, así que la route hereda y
+#      matchea cualquier Host.
+#   2. El diseño del egreso NO reescribe el Host (README §4): el request llega con
+#      `Host: server2.echoserver.svc.cluster.local` —el del cliente original— aunque el SNI
+#      sea `app2.paas-demo.bancogalicia.com.ar`. Si acá se declarara el FQDN público, la
+#      route no engancharía y el síntoma sería un 404 del destino, no un error de config.
+#
+# Es el mismo motivo por el que `destino/10` deja el listener sin hostname. Vale la pena
+# tenerlo presente cuando se monte EKS de verdad.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: server2
+  namespace: echoserver-eks-sim
+spec:
+  parentRefs:
+    - name: ingress-sim
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server2
+          port: 8080
+---
+# Verificación:
+#   oc -n echoserver-eks-sim get httproute server2 \
+#     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+#   -> Accepted=True ResolvedRefs=True, y después kuadrant.io/AuthPolicyAffected=True al aplicar 05

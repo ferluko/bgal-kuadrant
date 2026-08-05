@@ -1,0 +1,71 @@
+# Destino SIMULADO — clave pública pineada, servida localmente.
+# Calcado de destino/11-jwks-static.yaml, con el ns cambiado.
+#
+# Authorino no acepta JWKS inline: valida por `issuerUrl` (OIDC discovery) o por `jwksUrl`.
+# Para no depender de conectividad hacia el origen, el JWKS se publica dentro del propio
+# destino desde un ConfigMap. Clave preacordada, cero dependencia cross-cluster — que es
+# justamente la propiedad del diseño que interesa conservar.
+#
+# EL ConfigMap NO ESTÁ EN ESTE ARCHIVO: se crea directo del archivo que produce
+# `keys/gen-signing-key.sh`, así no hay que pegar `x` e `y` a mano ni hay forma de que se
+# desincronicen de la clave real (que es el modo de falla del `kid` que avisa ese script):
+#
+#   oc -n echoserver-eks-sim create configmap jwks-egress-origen \
+#     --from-file=jwks.json=../keys/out/jwks.json --dry-run=client -o yaml | oc apply -f -
+#
+# Reaplicar ese comando cada vez que se rote la clave de firma.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwks-egress
+  namespace: echoserver-eks-sim
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: jwks-egress }
+  template:
+    metadata:
+      labels: { app: jwks-egress }
+    spec:
+      containers:
+        - name: httpd
+          image: registry.access.redhat.com/ubi9/httpd-24:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: jwks
+              mountPath: /var/www/html
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /jwks.json, port: 8080 }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: jwks
+          configMap:
+            name: jwks-egress-origen
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwks-egress
+  namespace: echoserver-eks-sim
+spec:
+  selector: { app: jwks-egress }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      appProtocol: http
+---
+# Verificación — el `kid` de acá tiene que ser el mismo que el del token que emite el
+# origen. Si no coinciden, el destino devuelve 401 a todo y el síntoma parece de red:
+#
+#   oc -n echoserver-eks-sim run c$RANDOM --rm -i --restart=Never \
+#     --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+#     curl -s http://jwks-egress.echoserver-eks-sim.svc.cluster.local:8080/jwks.json

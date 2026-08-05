@@ -723,6 +723,14 @@ probar el rollback de intercepción (`patch` del selector) y verificar lo mismo.
 Verde en §6.1 significa *"la intercepción local funciona y el token se emite"*. No significa nada
 de esto:
 
+> **Casi todo lo de abajo se puede destrabar sin EKS** con el destino simulado de
+> [`sim-destino/`](sim-destino/), que conserva el FQDN real y sólo le fija los `endpoints`
+> — así `origen/03`, `origen/04` y las cuatro fases de `08-rollout/` se aplican verbatim.
+> Queda afuera lo que depende de la red real: RTT, skew de reloj entre clusters y el
+> passthrough del NLB. **Estado 2026-08-04:** DNS de `app2` ✅ y sin proxy corporativo, pero
+> TCP/443 da timeout desde el pod **y desde el bastión** — falta ruteo/firewall a la VPC, y
+> es un pedido a redes, no algo resoluble desde OpenShift.
+
 - **Todo el tramo remoto.** DNS de `app2` desde un pod, ruteo L3 a la VPC, RTT inter-cluster. Y el
   **proxy corporativo**: si la salida obligatoria es por proxy, este patrón no funciona tal cual y
   el egreso hay que rediseñarlo (`origen/02` §Pre-requisitos de red). Sigue siendo pregunta abierta.
@@ -885,6 +893,14 @@ destino/13b-authpolicy-jwt-kuadrant.yaml       OPCIÓN B (recomendada): Kuadrant
 destino/13a-istio-jwt-validation.yaml          OPCIÓN A: Istio, JWKS inline — menor huella
 destino/14-ratelimitpolicy.yaml                cuota por origen (Opción B, opcional)
 alternativas/interceptacion-externalname.yaml  fallback si los pods del gw no están en el ns
+sim-destino/                                   DESTINO SIMULADO: migrar sin EKS (§7.6)
+  00-gen-certs.sh                              CA de lab + cert del FQDN real + los 2 Secrets
+  01-namespace-server2.yaml                    server2 "remoto" (marcado SIM_SITE=eks-sim)
+  02-gateway-sim.yaml                          Gateway HTTPS:443 que hace de NLB+Envoy de EKS
+  03-httproute-server2.yaml                    ruta al server2 remoto, sin hostnames
+  04-jwks-static.yaml                          JWKS pineado (el ConfigMap sale de keys/out/)
+  05-authpolicy-jwt.yaml                       validación del wristband del lado destino
+  06-serviceentry-sim.yaml                     ORIGEN: el FQDN real con endpoints fijados
 ```
 
 Fuera de este directorio, pero requisito de la validación (§7.0):

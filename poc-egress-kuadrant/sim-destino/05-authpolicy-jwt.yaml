@@ -1,0 +1,77 @@
+# Destino SIMULADO — validación del wristband. Calcado de destino/13b-authpolicy-jwt-kuadrant.yaml.
+#
+# Es la pieza que convierte la simulación en algo que vale la pena: cierra el lazo completo
+# firma -> transporte -> validación por claims, y con eso quedan ejecutables las pruebas
+# negativas (b) token manipulado, (c) token expirado y (d) claims de otro consumidor, que
+# sin destino no se pueden correr (README §7.4).
+#
+# Sin `x-egress-token` válido -> 401. Con token válido pero claims que no corresponden -> 403.
+# La firma se valida contra el JWKS pineado (04); `exp`/`iat` los valida el verificador JWT.
+#
+# Los claims esperados son LOS MISMOS que en el destino real, sin tocar: los emite
+# origen/05-authpolicy-wristband.yaml y no dependen de dónde esté el destino.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: server2-ingress-jwt
+  namespace: echoserver-eks-sim
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: server2
+  rules:
+    authentication:
+      "egress-wristband":
+        jwt:
+          jwksUrl: http://jwks-egress.echoserver-eks-sim.svc.cluster.local:8080/jwks.json
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+            prefix: ""
+    authorization:
+      "claims-esperados":
+        patternMatching:
+          patterns:
+            - predicate: |
+                auth.identity.iss == "https://egress.paas-arqlab.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.aud == "app2.paas-demo.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.src_cluster == "paas-arqlab"
+            - predicate: |
+                auth.identity.src_namespace == "echoserver"
+            - predicate: |
+                auth.identity.dst_service == "server2"
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de server2"
+      success:
+        headers:
+          "x-forwarded-src-cluster":
+            plain:
+              expression: auth.identity.src_cluster
+          "x-forwarded-src-namespace":
+            plain:
+              expression: auth.identity.src_namespace
+---
+# Verificación:
+#   oc -n echoserver-eks-sim get authpolicy server2-ingress-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{" "}{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+#   -> True True   (NO mandar tráfico antes: attacheada y sin sincronizar deniega todo)
+#
+# Notas de compatibilidad (idénticas a destino/13b):
+#  - `predicate` (CEL) requiere Authorino >= 0.19 / RHCL 1.x. En versiones previas:
+#       patterns:
+#         - {selector: auth.identity.aud, operator: eq, value: app2.paas-demo.bancogalicia.com.ar}
+#  - Si `aud` llegara como lista en vez de string:
+#       "app2.paas-demo.bancogalicia.com.ar" in auth.identity.aud
+#
+# Los `x-forwarded-src-*` que agrega este bloque son la señal de que el request pasó por la
+# validación del destino y no por otro camino: aparecen en la salida del BFF bajo
+# `.upstream.body.request.headers`, junto al `x-egress-token`.

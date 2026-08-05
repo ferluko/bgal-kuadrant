@@ -1,0 +1,76 @@
+# Cluster ORIGEN — ServiceEntry apuntado al destino SIMULADO.
+#
+# Reemplaza a `origen/02-serviceentry-destino.yaml` mientras la red hacia EKS esté cerrada.
+# APLICAR EN EL NS `echoserver`, no en el del destino simulado.
+#
+# LA IDEA CENTRAL DE TODA LA SIMULACIÓN ESTÁ ACÁ
+#   El `host` es el FQDN REAL, sin cambiar: `app2.paas-demo.bancogalicia.com.ar`. Lo único
+#   que se agrega es el bloque `endpoints`, que fija a mano dónde vive ese nombre.
+#
+#   Consecuencia: `origen/03-httproute-egress.yaml`, `origen/04-destinationrule-tls.yaml` y
+#   las CUATRO fases de `origen/08-rollout/` se aplican **verbatim, sin tocar un solo
+#   campo**. No hay una variante "de simulación" de cada manifiesto que después haya que
+#   mantener en paralelo y que se desincronice.
+#
+# PASAR DE SIMULACIÓN A REAL = BORRAR EL BLOQUE `endpoints`.
+#   Sin `endpoints` y con `resolution: DNS`, Istio resuelve el FQDN por su cuenta y este
+#   archivo queda idéntico a `origen/02`. Un solo bloque de diferencia entre el laboratorio
+#   y producción.
+#
+# QUÉ SÍ SE EJERCITA CON ESTO
+#   El path de `MESH_EXTERNAL` + `resolution: DNS` + puerto 443 declarado `protocol: HTTP`
+#   (para que Envoy rutee L7 y pueda inyectar el header) + TLS origination del
+#   DestinationRule. Es decir: todo lo que hoy está sin probar del tramo de egreso.
+#
+# QUÉ NO
+#   La resolución del FQDN público contra la zona privada de AWS — pero eso ya quedó
+#   verificado por separado (CoreDNS resuelve `app2` a 172.19.105.122); lo que falta es el
+#   camino L3, que es un pedido a redes, no algo que se pueda simular.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: server2-destino
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/modo: "simulacion — endpoints fijados al destino local"
+    poc.galicia.io/pasar-a-real: "borrar el bloque spec.endpoints"
+spec:
+  hosts:
+    - app2.paas-demo.bancogalicia.com.ar
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 443
+      name: http-for-tls-origination
+      # `HTTP` a propósito, igual que en origen/02: es el patrón oficial de TLS origination
+      # en egress gateway. Envoy rutea L7 —necesario para inyectar el x-egress-token— y el
+      # DestinationRule hace el upgrade a TLS. Con `HTTPS` sería TCP opaco y no habría
+      # inyección posible.
+      protocol: HTTP
+  endpoints:
+    # <<< ESTE BLOQUE ES LO ÚNICO QUE DISTINGUE LA SIMULACIÓN DE LA REALIDAD.
+    #
+    # El Service del Gateway simulado sigue el patrón <gateway>-<gatewayclass> del
+    # controller openshift-default, igual que `egress-gw-openshift-default`. Se usa el FQDN
+    # y no la ClusterIP a propósito: la ClusterIP cambia si alguien recrea el Gateway, el
+    # nombre no. Con `resolution: DNS`, Envoy arma un cluster STRICT_DNS y lo resuelve solo.
+    - address: ingress-sim-openshift-default.echoserver-eks-sim.svc.cluster.local
+      ports:
+        http-for-tls-origination: 443
+---
+# Verificación:
+#
+# 1) El host quedó en el registry del proxy de egreso:
+#
+#   POD=$(oc -n echoserver get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
+#   oc -n echoserver exec $POD -- curl -s localhost:15000/clusters | grep app2.paas-demo | head -5
+#
+# 2) El HTTPRoute con el backendRef remoto resuelve (es la PRIMERA vez que se ejercita
+#    `backendRef kind: Hostname` en este cluster):
+#
+#   oc -n echoserver get httproute egress-server2 \
+#     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+#
+#   `ResolvedRefs=False` acá significa que el controller NO acepta `kind: Hostname` como
+#   backendRef. El fallback está documentado en origen/03: VirtualService nativo con weight,
+#   o un Service ExternalName usado como backendRef.
