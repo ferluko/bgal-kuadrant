@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# Batería de escenarios de la PoC de egreso, con veredicto por línea.
+#
+#   ./run-escenarios.sh                  # solo lectura: reporta lo que HOY es cierto
+#   ./run-escenarios.sh --aplicar        # además aplica las fases del rollout y restaura al salir
+#   ./run-escenarios.sh --pesos          # suma el escenario de reparto por peso (100 requests)
+#   ./run-escenarios.sh --expirado       # suma la prueba (c): espera >300s a que caduque un token
+#   ./run-escenarios.sh --aplicar --pesos --expirado
+#
+# Variables: URL, HOST, NS, NS_SIM, FQDN (ver abajo).
+#
+# Cada escenario dice QUÉ PRUEBA antes de correr, y cada chequeo termina en PASS / FALLA /
+# SKIP con el valor obtenido al lado. Al final, un resumen y exit code 0/1.
+#
+# Los escenarios que necesitan algo que todavía no existe se SALTEAN con el motivo, no
+# fallan: correrlo con el destino simulado a medio montar es normal y tiene que dar una
+# lectura útil igual.
+set -uo pipefail   # sin -e: los fallos se reportan, no cortan la corrida
+
+URL="${URL:-http://10.254.28.68}"
+HOST="${HOST:-app1.paas-demo.bancogalicia.com.ar}"
+NS="${NS:-echoserver}"
+NS_SIM="${NS_SIM:-echoserver-eks-sim}"
+FQDN="${FQDN:-app2.paas-demo.bancogalicia.com.ar}"
+HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+APLICAR=0; PESOS=0; EXPIRADO=0
+for a in "$@"; do case "$a" in
+  --aplicar)  APLICAR=1 ;;
+  --pesos)    PESOS=1 ;;
+  --expirado) EXPIRADO=1 ;;
+  -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
+  *) echo "opción desconocida: $a"; exit 2 ;;
+esac; done
+
+if [[ -t 1 ]]; then V=$'\e[32m'; R=$'\e[31m'; A=$'\e[33m'; B=$'\e[1m'; D=$'\e[2m'; Z=$'\e[0m'
+else V=; R=; A=; B=; D=; Z=; fi
+
+PASS=0; FALLA=0; SKIP=0; FALLIDOS=()
+FASE_PREVIA=""
+
+esc()  { printf '\n%s══ %s ══%s\n%s   %s%s\n' "$B" "$1" "$Z" "$D" "$2" "$Z"; }
+ok()   { printf '  %s✔ PASS%s   %-46s %s\n' "$V" "$Z" "$1" "${2-}"; PASS=$((PASS+1)); }
+bad()  { printf '  %s✘ FALLA%s  %-46s obtenido=%s  esperado=%s\n' "$R" "$Z" "$1" "${2-}" "${3-}"; FALLA=$((FALLA+1)); FALLIDOS+=("$1"); }
+skip() { printf '  %s− SKIP%s    %-46s %s\n' "$A" "$Z" "$1" "${2-}"; SKIP=$((SKIP+1)); }
+nota() { printf '  %s%s%s\n' "$D" "$1" "$Z"; }
+
+eq()   { [[ "$2" == "$3" ]] && ok "$1" "$2" || bad "$1" "$2" "$3"; }
+ne()   { [[ "$2" != "$3" ]] && ok "$1" "$2" || bad "$1" "$2" "distinto de $3"; }
+tiene(){ [[ "$2" == *"$3"* ]] && ok "$1" "$2" || bad "$1" "$2" "que contenga $3"; }
+
+req()  { curl -s --max-time 15 -H "Host: $HOST" "$@" "$URL/"; }
+f()    { printf '%s' "${1:-}" | jq -r "${2} // \"null\"" 2>/dev/null || echo "null"; }
+existe(){ oc get "$1" "$2" ${3:+-n "$3"} >/dev/null 2>&1; }
+
+# Petición TLS directa al destino simulado, con SNI del FQDN real y un token arbitrario.
+# Va por `oc exec` al pod `server` (tiene python3) en vez de crear un pod por prueba:
+# es ~10x más rápido y no depende de que la imagen de debug traiga curl.
+directo_al_destino() {
+  local ip="$1" tok="${2-}"
+  oc -n "$NS" exec -i deploy/server -- python3 - "$ip" "$FQDN" "$HOST_INTERNO" "$tok" <<'PY' 2>/dev/null || echo "ERROR"
+import http.client, socket, ssl, sys
+ip, fqdn, hosthdr, tok = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+ctx = ssl._create_unverified_context()
+try:
+    tls = ctx.wrap_socket(socket.create_connection((ip, 443), timeout=8), server_hostname=fqdn)
+    c = http.client.HTTPSConnection(fqdn, 443, context=ctx, timeout=8); c.sock = tls
+    h = {"Host": hosthdr}
+    if tok:
+        h["x-egress-token"] = tok
+    c.request("GET", "/", headers=h)
+    print(c.getresponse().status)
+except Exception as e:
+    print("ERROR:%s" % type(e).__name__)
+PY
+}
+
+restaurar() {
+  [[ -n "$FASE_PREVIA" ]] || return 0
+  printf '\n%s>> restaurando el HTTPRoute al estado previo%s\n' "$D" "$Z"
+  oc apply -n "$NS" -f "$FASE_PREVIA" >/dev/null 2>&1 && echo "   ok: $(basename "$FASE_PREVIA")" || echo "   NO SE PUDO — revisar a mano"
+}
+trap restaurar EXIT
+
+aplicar_fase() {
+  local f="$1"
+  if (( ! APLICAR )); then skip "aplicar $(basename "$f")" "correr con --aplicar"; return 1; fi
+  if [[ -z "$FASE_PREVIA" ]]; then FASE_PREVIA="$DIR/../origen/08-rollout/fase0a-solo-local.yaml"; fi
+  oc apply -n "$NS" -f "$f" >/dev/null 2>&1 || { bad "aplicar $(basename "$f")" "error" "aplicado"; return 1; }
+  sleep 4
+  ok "aplicado $(basename "$f")"
+  return 0
+}
+
+printf '%sPoC egreso Kuadrant — batería de escenarios%s\n' "$B" "$Z"
+nota "entrada: $URL  Host: $HOST     ns: $NS / $NS_SIM"
+for b in oc jq curl; do command -v $b >/dev/null || { echo "falta '$b' en el PATH"; exit 2; }; done
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+esc "E0 — Entorno" "que el punto de partida sea el que la PoC asume, antes de medir nada"
+
+CONT=$(oc -n "$NS" get pod -l app=server -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null)
+eq "server corre un solo contenedor" "$CONT" "bff"
+
+SEL=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.selector.gateway\.networking\.k8s\.io/gateway-name}' 2>/dev/null)
+eq "cutover activo (svc server2 -> gateway)" "${SEL:-app=server2}" "egress-gw"
+
+CIP=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+nota "ClusterIP de server2: $CIP  (tiene que ser la misma de siempre: nunca se recreó el Service)"
+
+BREF=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.spec.rules[*].backendRefs[*].name}' 2>/dev/null)
+tiene "ASSERT ANTI-LOOP: backendRef local" "$BREF" "server2-local"
+[[ "$BREF" == *"server2 "* || "$BREF" == "server2" ]] && bad "backendRef NO apunta a 'server2'" "$BREF" "sin 'server2' pelado"
+
+ENVAMB=$(oc -n "$NS" get deploy server2 -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="ENABLE__ENVIRONMENT")]}{.value}{end}' 2>/dev/null)
+eq "server2 expone HOSTNAME (conteo no ciego)" "$ENVAMB" "true"
+
+GWIP=$(oc -n "$NS" get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
+POD2=$(oc -n "$NS" get pod -l app=server2 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+nota "pod del gateway de egreso: $GWIP   |   server2 local: $POD2"
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+esc "E1 — Camino local por el gateway de egreso" \
+    "que el tráfico atraviesa el Envoy de egreso y vuelve al server2 local, con wristband emitido"
+
+J=$(req)
+eq  "status del backend"                     "$(f "$J" '.upstream.status')" "200"
+eq  "atendió el server2 local"               "$(f "$J" '.upstream.body.environment.HOSTNAME')" "$POD2"
+tiene "el origen que ve el backend es el gw" "$(f "$J" '.upstream.body.host.ip')" "$GWIP"
+eq  "el Host NO se reescribe"                "$(f "$J" '.upstream.body.request.headers.host')" "$HOST_INTERNO"
+ne  "pasó por un Envoy de egreso"            "$(f "$J" '.upstream.body.request.headers["x-envoy-peer-metadata-id"]')" "null"
+
+TOKEN=$(f "$J" '.upstream.body.request.headers["x-egress-token"]')
+ne  "wristband inyectado"                    "$TOKEN" "null"
+
+if [[ "$TOKEN" != "null" ]]; then
+  d(){ printf '%s' "$1" | jq -R 'gsub("-";"+")|gsub("_";"/")| . + ("===="[0:(4-(length%4))%4]) | @base64d | fromjson'; }
+  HDR=$(d "$(cut -d. -f1 <<<"$TOKEN")"); CLM=$(d "$(cut -d. -f2 <<<"$TOKEN")")
+  eq "  alg del token"        "$(f "$HDR" '.alg')" "ES256"
+  eq "  claim iss"            "$(f "$CLM" '.iss')" "https://egress.paas-arqlab.bancogalicia.com.ar"
+  eq "  claim aud"            "$(f "$CLM" '.aud')" "$FQDN"
+  eq "  claim src_cluster"    "$(f "$CLM" '.src_cluster')" "paas-arqlab"
+  eq "  claim src_namespace"  "$(f "$CLM" '.src_namespace')" "$NS"
+  eq "  claim dst_service"    "$(f "$CLM" '.dst_service')" "server2"
+  eq "  vida del token (exp-iat)" "$(( $(f "$CLM" '.exp') - $(f "$CLM" '.iat') ))" "300"
+  KID=$(f "$HDR" '.kid'); nota "kid del token: $KID"
+  nota "OJO: 'sub' lo agrega Authorino desde la identidad anonymous — NO identifica al workload (README §8.1)"
+fi
+nota "latencia hop1->hop2: $(f "$J" '.upstream.latencyMs') ms"
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+esc "E2 — Destino simulado" \
+    "que existe un destino que VALIDA el token, y que rechaza lo que tiene que rechazar"
+
+if ! existe ns "$NS_SIM"; then
+  skip "todo el escenario E2" "falta el ns $NS_SIM — ver sim-destino/README.md §4"
+  SIM=0
+else
+  SIM=1
+  PROG=$(oc -n "$NS_SIM" get gateway ingress-sim -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
+  eq "Gateway del destino Programmed" "${PROG:-null}" "True"
+
+  AP=$(oc -n "$NS_SIM" get authpolicy server2-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
+  eq "AuthPolicy del destino Accepted/Enforced" "${AP:-null}" "True/True"
+
+  SIMIP=$(oc -n "$NS_SIM" get svc ingress-sim-openshift-default -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+  KIDJ=$(oc -n "$NS_SIM" get cm jwks-egress-origen -o jsonpath='{.data.jwks\.json}' 2>/dev/null | jq -r '.keys[0].kid' 2>/dev/null)
+  eq "kid del JWKS == kid del token" "${KIDJ:-null}" "${KID:-sin-token}"
+
+  if [[ -n "${SIMIP:-}" ]]; then
+    eq "(a) sin token -> 401"            "$(directo_al_destino "$SIMIP")"                 "401"
+    eq "     token válido -> 200"        "$(directo_al_destino "$SIMIP" "$TOKEN")"        "200"
+    eq "(b) firma alterada -> 401"       "$(directo_al_destino "$SIMIP" "${TOKEN%?}X")"   "401"
+    eq "(b) token basura -> 401"         "$(directo_al_destino "$SIMIP" "no-es-un-jwt")"  "401"
+  else
+    skip "pruebas directas al destino" "no se pudo leer la ClusterIP del gateway simulado"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+esc "E3 — Canary por header" \
+    "que el tráfico marcado va al destino Y QUE EL DESTINO LO AUTORIZA, sin tocar al resto"
+
+if (( ! SIM )); then
+  skip "escenario E3" "requiere el destino simulado (E2)"
+else
+  RULES=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.spec.rules[*].name}' 2>/dev/null)
+  if [[ "$RULES" != *canary* ]]; then aplicar_fase "$DIR/../origen/08-rollout/fase1-canary-header.yaml"; fi
+
+  RR=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}' 2>/dev/null)
+  eq "backendRef kind:Hostname resuelve" "${RR:-null}" "True"
+  nota "(primera vez que se ejercita kind:Hostname en este cluster; False => fallback de origen/03)"
+
+  if [[ "$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.spec.rules[*].name}' 2>/dev/null)" == *canary* ]]; then
+    C=$(req -H 'x-canary: true')
+    eq "con x-canary -> destino"          "$(f "$C" '.upstream.body.environment.SIM_SITE')" "eks-sim"
+    eq "con x-canary -> status"           "$(f "$C" '.upstream.status')" "200"
+    eq "EL DESTINO VALIDÓ EL JWT"         "$(f "$C" '.upstream.body.request.headers["x-forwarded-src-cluster"]')" "paas-arqlab"
+    eq "  y propagó el namespace"         "$(f "$C" '.upstream.body.request.headers["x-forwarded-src-namespace"]')" "$NS"
+    eq "  Host sigue sin reescribir"      "$(f "$C" '.upstream.body.request.headers.host')" "$HOST_INTERNO"
+    nota "latencia al destino: $(f "$C" '.upstream.latencyMs') ms  (sin RTT real: el stand-in es local)"
+
+    N=$(req)
+    eq "sin el header -> sigue local"     "$(f "$N" '.upstream.body.environment.SIM_SITE')" "null"
+    eq "sin el header -> status"          "$(f "$N" '.upstream.status')" "200"
+  else
+    skip "canary por header" "fase1 no aplicada"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+if (( PESOS )); then
+esc "E4 — Reparto por peso" "que 'weight' funciona sobre un backendRef kind:Hostname (75/25)"
+  if (( ! SIM )); then skip "escenario E4" "requiere el destino simulado"
+  else
+    if aplicar_fase "$DIR/../origen/08-rollout/fase2-pesos.yaml"; then
+      oc -n "$NS" patch httproute egress-server2 --type json -p \
+        '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":75},
+          {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":25}]' >/dev/null 2>&1
+      sleep 4
+      LOC=0; REM=0; ERR=0
+      for _ in $(seq 1 100); do
+        case "$(req | jq -r '.upstream.body.environment.SIM_SITE // (if .upstream.status==200 then "local" else "err" end)' 2>/dev/null)" in
+          eks-sim) REM=$((REM+1)) ;; local) LOC=$((LOC+1)) ;; *) ERR=$((ERR+1)) ;;
+        esac
+      done
+      nota "local=$LOC  destino=$REM  errores=$ERR   (esperado ~75/25)"
+      eq  "sin errores en el reparto" "$ERR" "0"
+      (( REM >= 10 && REM <= 45 )) && ok "proporción al destino dentro de rango" "$REM%" \
+                                    || bad "proporción al destino dentro de rango" "$REM%" "entre 10 y 45"
+      (( LOC > 0 )) && ok "el backend local sigue recibiendo" "$LOC%" || bad "el backend local sigue recibiendo" "0" ">0"
+    fi
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+if (( EXPIRADO )); then
+esc "E5 — (c) Token expirado" "que el destino mira 'exp' — sin esto el modelo de replay no vale"
+  if (( ! SIM )) || [[ -z "${SIMIP:-}" ]]; then skip "escenario E5" "requiere el destino simulado"
+  else
+    VIEJO=$(req | jq -r '.upstream.body.request.headers["x-egress-token"]')
+    eq "el token viejo hoy es válido" "$(directo_al_destino "$SIMIP" "$VIEJO")" "200"
+    nota "esperando 305 s a que caduque (tokenDuration=300)..."
+    sleep 305
+    eq "(c) el mismo token, ya expirado -> 401" "$(directo_al_destino "$SIMIP" "$VIEJO")" "401"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+printf '\n%s══ Resumen ══%s\n' "$B" "$Z"
+printf '  %s%d PASS%s   %s%d FALLA%s   %s%d SKIP%s\n' "$V" "$PASS" "$Z" "$R" "$FALLA" "$Z" "$A" "$SKIP" "$Z"
+if (( FALLA )); then printf '\n  %sFallaron:%s\n' "$R" "$Z"; for x in "${FALLIDOS[@]}"; do printf '   - %s\n' "$x"; done; fi
+(( SKIP )) && nota "los SKIP no son fallos: indican qué falta montar para que ese escenario tenga sentido"
+exit $(( FALLA > 0 ))

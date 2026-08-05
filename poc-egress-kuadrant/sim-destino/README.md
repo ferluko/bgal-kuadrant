@@ -59,6 +59,29 @@ Consecuencia: `origen/03`, `origen/04` y las cuatro fases de `origen/08-rollout/
 
 **Pasar de simulación a real = borrar el bloque `endpoints` de [`06-serviceentry-sim.yaml`](06-serviceentry-sim.yaml).**
 
+## 3bis. La batería de escenarios
+
+[`run-escenarios.sh`](run-escenarios.sh) corre todo lo verificable y da un veredicto por
+línea. **Por defecto es de sólo lectura**: reporta lo que hoy es cierto sin tocar nada.
+
+```bash
+./run-escenarios.sh
+```
+
+| Flag | Qué agrega |
+|---|---|
+| `--aplicar` | aplica las fases del rollout que cada escenario necesita, y **restaura el estado previo al salir** (trap en EXIT) |
+| `--pesos` | reparto 75/25 sobre 100 requests, para probar `weight` sobre `kind: Hostname` |
+| `--expirado` | la prueba (c): guarda un token, espera 305 s y lo reusa |
+
+Escenarios: **E0** entorno (incluido el assert anti-loop), **E1** camino local con el
+wristband y sus claims, **E2** destino simulado y las negativas (a) y (b), **E3** canary por
+header —donde se comprueba que **el destino validó el JWT**—, **E4** pesos, **E5** expiración.
+
+Los **SKIP no son fallos**: indican qué falta montar para que ese escenario tenga sentido.
+Correrlo con el destino a medio montar da una lectura útil igual. Sale con código 1 si hubo
+alguna FALLA, así que sirve en CI.
+
 ## 4. Montaje
 
 Prerrequisito: §6.1 del README de la PoC en verde (cutover local hecho, wristband emitiéndose).

@@ -767,6 +767,12 @@ de esto:
    `authentication.x509` / principal de Istio; o `kubernetesTokenReview` del SA token si se
    acepta tocar la app. Ese principal debe ir al claim `sub` del wristband, y el destino
    autorizar por `sub` en vez de por constantes.
+
+   > **Cuidado con el `sub` que ya aparece.** Los tokens emitidos hoy traen un
+   > `sub: 556cb5a2…` que **no está en `origen/05`**: lo agrega Authorino derivándolo de la
+   > identidad, y la identidad acá es `anonymous`. Es estable, parece un principal, y **no
+   > identifica a nadie** — es un derivado de "cualquiera que llegó al gateway". No confundirlo
+   > con que este pendiente esté resuelto, ni autorizar por ese `sub` en el destino.
 2. **Rotación de la clave de firma.** `signingKeyRefs` acepta lista: se agrega la clave nueva, se
    publica el JWKS con ambas en el destino, se rota y se retira la vieja. Distribuir la privada
    con ESO/Vault (ver ADR-0004) hacia `kuadrant-system`, nunca en git.
@@ -778,6 +784,16 @@ de esto:
 4. **Observabilidad.** Métricas del gateway de egreso por backend + trazas con `traceparent`
    propagado, para poder responder "¿el 500 fue de `server2` o del salto entre clusters?".
    Es además el criterio de avance de las fases.
+
+   > **`x-request-id` NO sirve para correlacionar entre clusters — medido en `paas-arqlab`
+   > (2026-08-04).** El gateway de egreso **regenera** el header. Verificado con los tres
+   > valores del mismo request: entró al BFF `c1c30af4…`, salió del BFF `c1c30af4…` (o sea,
+   > el cliente lo propaga fiel) y llegó al backend `1c60e4f2…`. Es el comportamiento por
+   > defecto de Envoy como edge proxy (`preserve_external_request_id: false`), no un defecto
+   > de la cadena — pero significa que un log del origen y uno del destino **no se van a
+   > poder unir por ese id**. Se resuelve con un `EnvoyFilter` que ponga
+   > `preserve_external_request_id: true` en el HCM del gateway, o adoptando `traceparent`
+   > (W3C), que Envoy sí propaga. Definirlo **antes** de que haya dos clusters, no después.
 5. **`aud` por destino.** Un `aud` distinto por servicio destino evita que un token emitido para
    `server2` sirva contra otro backend del mismo gateway de ingreso.
 6. **Si se insiste con HMAC:** agregar un firmador propio (Deployment que lee el Secret y expone
@@ -901,6 +917,7 @@ sim-destino/                                   DESTINO SIMULADO: migrar sin EKS 
   04-jwks-static.yaml                          JWKS pineado (el ConfigMap sale de keys/out/)
   05-authpolicy-jwt.yaml                       validación del wristband del lado destino
   06-serviceentry-sim.yaml                     ORIGEN: el FQDN real con endpoints fijados
+  run-escenarios.sh                            batería E0-E5 con veredicto PASS/FALLA/SKIP
 ```
 
 Fuera de este directorio, pero requisito de la validación (§7.0):
