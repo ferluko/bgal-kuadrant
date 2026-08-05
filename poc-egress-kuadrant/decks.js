@@ -199,7 +199,7 @@ function tecnico() {
   s = p.addSlide();
   encabezado(s, "Qué NO se probó", "Verde significa que la mecánica funciona. No significa nada de esto.");
   const nop = [
-    ["Red real hacia el destino", "No hay camino a la VPC: el DNS resuelve y no hay proxy, pero el puerto 443 da timeout desde el pod y desde el bastión. Es un pedido a redes."],
+    ["El tramo contra el destino real", "El cluster destino está alcanzable y su política enforceando, pero la clave pública que tiene pineada quedó de una versión anterior y todavía rechaza los tokens. Falta sincronizarla; del lado origen no cambia nada."],
     ["RTT y skew de reloj", "El token nace y muere bajo el mismo reloj. El modo de falla del vencimiento entre clusters queda intacto."],
     ["Capacidad", "Ninguna prueba de carga. El gateway pasa a estar en el camino crítico de la aplicación."],
     ["Clientes con pool de conexiones", "El cliente de prueba abre una conexión por request, así que el cutover se ve instantáneo. Un cliente real con pool persistente va a tener una cola que esto no muestra."],
@@ -232,8 +232,8 @@ function tecnico() {
   // 11 — cierre
   s = p.addSlide();
   tituloOscuro(s, "PRÓXIMOS PASOS", "Lo que sigue",
-    "1 · Pedido a redes para abrir el camino a la VPC\n2 · Enmendar el ADR con el hallazgo de algoritmos\n3 · Definir la correlación de trazas antes de tener dos clusters\n4 · Resolver la identidad del llamador y la clave multi-tenant");
-  s.addText("Detalle: README.md · RESUMEN.md · HALLAZGOS.md", { x: M, y: 6.5, w: 8, h: 0.4, fontSize: 13, color: C.mint, fontFace: B, margin: 0 });
+    "1 · Sincronizar la clave pública en el cluster destino\n2 · Enmendar el ADR con el hallazgo de algoritmos\n3 · Definir la correlación de trazas antes de tener dos clusters\n4 · Resolver la identidad del llamador y la clave multi-tenant");
+  s.addText("Detalle: RESUMEN.md · HALLAZGOS.md · pedido-jwks-eks.md", { x: M, y: 6.5, w: 8, h: 0.4, fontSize: 13, color: C.mint, fontFace: B, margin: 0 });
 
   return p.writeFile({ fileName: "poc-egreso-kuadrant-tecnica-2026-08.pptx" });
 }
@@ -310,13 +310,13 @@ function gerencial() {
   // 5 — bloqueante
   s = p.addSlide();
   s.background = { color: C.dark };
-  s.addText("EL ÚNICO BLOQUEANTE", { x: M, y: 1.35, w: 8, h: 0.4, fontSize: 13, color: C.amber, fontFace: B, bold: true, charSpacing: 2, margin: 0 });
-  s.addText("No hay camino de red\nhacia el cluster destino", { x: M, y: 1.8, w: 11.9, h: 1.5, fontSize: 38, color: C.white, fontFace: H, bold: true, margin: 0, lineSpacing: 44 });
-  s.addText("El nombre resuelve y no hay proxy en el medio, pero las conexiones al cluster de AWS no llegan — ni desde los servidores ni desde el bastión. Es un pedido de habilitación a la red corporativa, no un problema de la plataforma.",
+  s.addText("LO ÚNICO QUE FALTA", { x: M, y: 1.35, w: 8, h: 0.4, fontSize: 13, color: C.amber, fontFace: B, bold: true, charSpacing: 2, margin: 0 });
+  s.addText("Sincronizar una clave\nen el cluster destino", { x: M, y: 1.8, w: 11.9, h: 1.5, fontSize: 38, color: C.white, fontFace: H, bold: true, margin: 0, lineSpacing: 44 });
+  s.addText("El cluster destino ya está desplegado, es alcanzable desde el origen y su control de acceso está activo. Pero la clave pública que tiene cargada quedó de una versión anterior de la prueba, así que todavía rechaza las credenciales que emitimos.",
     { x: M, y: 3.55, w: 11.0, h: 1.0, fontSize: 16, color: "BFD3E6", fontFace: B, margin: 0, lineSpacing: 23 });
   tarjeta(s, M, 4.85, 11.9, 1.5, "2E3872");
-  s.addText("Mientras tanto, la prueba se completó contra un destino simulado dentro del mismo cluster.", { x: M + 0.35, y: 5.05, w: 11.2, h: 0.4, fontSize: 16, color: C.white, fontFace: H, bold: true, margin: 0 });
-  s.addText("Eso permitió validar todo salvo la latencia entre clusters y la diferencia de reloj entre ellos. Ambas quedan pendientes de la habilitación de red.",
+  s.addText("Es un cambio de configuración de minutos, y no depende de nuestro equipo.", { x: M + 0.35, y: 5.05, w: 11.2, h: 0.4, fontSize: 16, color: C.white, fontFace: H, bold: true, margin: 0 });
+  s.addText("La prueba se completó contra un destino simulado dentro del mismo cluster, lo que permitió validar todo salvo la latencia entre clusters y la diferencia de reloj entre ellos.",
     { x: M + 0.35, y: 5.5, w: 11.2, h: 0.7, fontSize: 14, color: "BFD3E6", fontFace: B, margin: 0, lineSpacing: 19 });
 
   // 6 — recomendación
@@ -324,7 +324,7 @@ function gerencial() {
   encabezado(s, "Recomendación", null);
   const rec = [
     ["Continuar", "El diseño se sostiene: la mecánica está probada y los problemas encontrados tienen solución conocida.", C.mint],
-    ["Pedir la habilitación de red", "Es el único bloqueante para completar la prueba con el cluster real. Sin eso no se puede medir latencia ni programar la migración.", C.deep],
+    ["Cerrar la prueba con el cluster real", "Pedir la sincronización de la clave en el destino. Es lo único que falta para medir latencia real y programar la migración.", C.deep],
     ["Enmendar la decisión de arquitectura", "El hallazgo sobre el algoritmo de firma afecta a la opción ya aprobada. Corregirlo ahora evita descubrirlo con los dos clusters montados.", C.amber],
     ["No ofrecerlo como servicio todavía", "Falta resolver la identidad del consumidor y el aislamiento de la clave entre equipos. Para un primer caso puntual, sirve como está.", C.red],
   ];

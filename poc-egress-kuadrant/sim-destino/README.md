@@ -1,31 +1,28 @@
 # Destino simulado — migrar `server2` a "EKS" sin EKS
 
-Stand-in local del cluster destino, para ejercitar la migración completa mientras la red
-hacia AWS esté cerrada.
+Stand-in local del cluster destino: permite ejercitar la migración completa sin depender del
+cluster EKS ni de quien lo administra.
 
 ## 1. Por qué existe
 
-El pre-flight del 2026-08-04 en `paas-arqlab` dio:
+Todo el tramo de egreso —`backendRef kind: Hostname`, pesos sobre él, TLS origination, el
+espejo, el canary y la validación del wristband del lado destino— sólo se puede probar contra
+un destino que exista, esté alcanzable y tenga la clave pública correcta. Depender de eso para
+cada iteración vuelve el ciclo de prueba lento y ajeno.
 
-| Chequeo | Resultado |
-|---|---|
-| DNS de `app2.paas-demo.bancogalicia.com.ar` desde un pod (CoreDNS) | ✅ resuelve `172.19.105.122` (CNAME al NLB `k8s-istiosys-kuadrant-c44863e1bd-…elb.us-east-1`) |
-| Proxy corporativo (`proxy/cluster`) | ✅ no hay — el patrón de egreso no se rediseña |
-| TCP 443 desde un pod | ❌ **timeout** a los 8 s |
-| TCP 443 desde el bastión (10.0.193.x) | ❌ **timeout** también |
+Este kit resuelve las tres cosas dentro del propio cluster, y **sigue siendo útil aunque EKS
+esté disponible**: es el banco de pruebas para cambios en los manifiestos del origen sin tocar
+el destino real ni pedirle nada a nadie.
 
-Timeout y no `ConnectionRefused`, y desde las dos subredes: falta ruteo a la VPC o hay un
-firewall en el medio. **No es un problema de OpenShift** y no se arregla desde acá — es un
-pedido a redes: habilitar TCP/443 desde `10.254.28.0/24` hacia `172.19.105.122`, con la
-aclaración de que sin `EgressIP` el origen es la IP del **nodo** donde corra el gateway, no
-la del pod.
-
-Mientras tanto, todo el tramo de egreso sigue sin ejercitarse. Esto lo destraba.
+**Estado del destino real (2026-08-05):** alcanzable desde un pod del origen en 182 ms, con el
+certificado válido y la `AuthPolicy` desplegada y enforceando — pero la clave pública pineada
+allá quedó de una versión anterior y rechaza los tokens. Ver [H12](../HALLAZGOS.md#h12) y
+[`../pedido-jwks-eks.md`](../pedido-jwks-eks.md).
 
 ## 2. Qué ejercita, y qué no
 
-**Sí** — todo lo que hoy figura como no validado en §7.6 del README de la PoC, salvo lo que
-depende de la red real:
+**Sí** — todo lo que figura como no validado en §7.6 del README de la PoC, salvo lo que exige
+el destino real:
 
 - `backendRef kind: Hostname` y `weight` sobre él (nunca probado en este cluster).
 - `ServiceEntry` `MESH_EXTERNAL` + `resolution: DNS` + 443 declarado `protocol: HTTP`.
@@ -46,7 +43,6 @@ depende de la red real:
   el modo de falla del `exp: 300` queda intacto. Es de los que más se pagan en producción.
 - El passthrough L4 del NLB: acá el TLS lo termina el mismo Envoy, pero sin el balanceador
   de AWS delante.
-- La resolución del FQDN contra la zona privada de AWS — ya validada por separado (ver §1).
 - El pooling de conexiones de un cliente real: el BFF abre una conexión TCP por request.
 
 ## 3. La idea que lo hace sostenible
@@ -57,7 +53,9 @@ y sólo le agrega un bloque `endpoints` que fija dónde vive ese nombre.
 Consecuencia: `origen/03`, `origen/04` y las cuatro fases de `origen/08-rollout/` se aplican
 **verbatim**. No hay una copia "de simulación" de cada manifiesto para mantener en paralelo.
 
-**Pasar de simulación a real = borrar el bloque `endpoints` de [`06-serviceentry-sim.yaml`](06-serviceentry-sim.yaml).**
+**Pasar de simulación a real = borrar el bloque `endpoints` de [`06-serviceentry-sim.yaml`](06-serviceentry-sim.yaml)**
+y volver a `resolution: DNS`, con lo que el archivo queda idéntico a `origen/02`. Con el destino
+real ya alcanzable, ese es el único cambio del lado origen.
 
 ## 3bis. La batería de escenarios
 

@@ -19,7 +19,7 @@ al lado equivocado**. Ninguno se detectó con un objeto en rojo — todos daban 
 | [H9](#h9) | **Authorino no valida su propio wristband** | diseño |
 | [H10](#h10) | `x-request-id` se regenera en el gateway | observabilidad |
 | [H11](#h11) | El claim `sub` no identifica a nadie | seguridad |
-| [H12](#h12) | No hay camino de red a EKS | infraestructura |
+| [H12](#h12) | El destino real confirma que el Host viaja sin reescribir | diseño |
 | [H13](#h13) | La prueba negativa de firma alterada no alteraba nada | validación |
 
 ---
@@ -208,22 +208,35 @@ pendiente de identidad de workload esté resuelto.
 ---
 
 <a id="h12"></a>
-## H12. No hay camino de red a EKS — 2026-08-05
+## H12. El destino real confirma que el Host viaja sin reescribir — 2026-08-05
 
-| Chequeo | Resultado |
+Verificado contra el cluster EKS, no contra el stand-in. Desde un pod de `paas-arqlab`, sobre el
+NLB del destino y con SNI `app2.paas-demo.bancogalicia.com.ar`:
+
+| `Host` enviado | Respuesta |
 |---|---|
-| DNS de `app2` desde un pod (CoreDNS) | ✅ resuelve `172.19.105.122` |
-| Proxy corporativo (`proxy/cluster`) | ✅ no hay |
-| TCP 443 desde un pod | ❌ timeout |
-| TCP 443 desde el bastión | ❌ timeout |
+| `server2.echoserver.svc.cluster.local:8080` | **401** + `www-authenticate: x-egress-token realm="egress-wristband"` |
+| `app2.paas-demo.bancogalicia.com.ar` | 404 |
+| el FQDN del NLB | 404 |
 
-Timeout y no `ConnectionRefused`, desde las dos subredes: falta ruteo a la VPC o hay un firewall.
-**No es un problema de OpenShift.**
+El 401 aparece **sólo con el Host interno**. Eso demuestra tres cosas de una:
 
-**Consecuencia:** pedido a redes — habilitar TCP/443 desde `10.254.28.0/24` hacia
-`172.19.105.122`, con la aclaración de que sin `EgressIP` el origen es la IP del **nodo** donde
-corra el gateway. Mientras tanto, [`sim-destino/`](sim-destino/) desbloquea todo lo que no depende
-de la red real.
+1. El `HTTPRoute` del destino engancha por el Host del cliente original, o sea que **la decisión de
+   §4 —no reescribir el Host, fijar el SNI en el `DestinationRule`— funciona contra el destino
+   real** y no sólo contra el simulador.
+2. El destino corre **Kuadrant, no Istio**: ese `realm` es el nombre de la identity source de la
+   propia `AuthPolicy` del diseño. La Opción B del ADR está desplegada y enforceando.
+3. La conectividad y el certificado están bien: el TLS cierra en 182 ms y los SAN del certificado
+   del destino cubren `app2.paas-demo.bancogalicia.com.ar`.
+
+**Lo que falta**, y es lo único: un wristband válido también recibe 401. La clave pública pineada
+en el destino corresponde a una versión anterior del par de firma — se regeneró varias veces
+durante la PoC. **El `kid` no lo delata**: es `egress-echoserver-1` en los dos lados, así que
+coincide mientras la firma no valida, y el síntoma es un 401 con body vacío indistinguible de un
+request sin credencial. Es exactamente el modo de falla que advierte `keys/gen-signing-key.sh`.
+
+**Consecuencia:** el cierre de punta a punta depende de sincronizar esa clave — ver
+[`pedido-jwks-eks.md`](pedido-jwks-eks.md). Nada del lado origen tiene que cambiar.
 
 ---
 

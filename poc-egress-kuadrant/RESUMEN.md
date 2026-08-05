@@ -76,10 +76,12 @@ suelto no hace llamadas salientes, así que el salto a migrar no existía. Ver
 
 Verde acá significa *"la mecánica funciona"*. No significa:
 
-- **Nada del tramo de red real.** No hay camino a la VPC: DNS resuelve, no hay proxy corporativo,
-  pero TCP/443 da timeout desde el pod **y desde el bastión**. Es un pedido a redes, no algo
-  resoluble desde OpenShift ([H12](HALLAZGOS.md#h12)). El destino se validó con un stand-in local
-  ([`sim-destino/`](sim-destino/)) que conserva el FQDN real y sólo le fija los `endpoints`.
+- **El tramo de punta a punta contra el destino real.** El cluster EKS está alcanzable, con la
+  política desplegada y enforceando, y el certificado válido — pero **la clave pública pineada allá
+  quedó de una versión anterior**, así que todavía rechaza los tokens. Falta sincronizarla
+  ([`pedido-jwks-eks.md`](pedido-jwks-eks.md)); nada del lado origen cambia. Todo lo que se validó
+  hasta ahora se hizo contra un stand-in local ([`sim-destino/`](sim-destino/)) que conserva el
+  FQDN real.
 - **RTT inter-cluster ni skew de reloj.** El token nace y muere bajo el mismo reloj, así que el
   modo de falla del `exp: 300` entre clusters queda intacto. Es de los que más se pagan en
   producción.
@@ -125,7 +127,10 @@ Por orden de peso:
 2. **Multi-tenancy de la clave de firma.** Kuadrant obliga a que viva en `kuadrant-system`, o sea
    en un namespace de plataforma y no del equipo de la app. Es una **limitación abierta**: sin
    resolverla, el patrón no es multi-tenant. Ver §8bis del README.
-3. **Red hacia el destino.** Bloqueante para cualquier prueba real.
+3. **Sincronizar la clave pública en el destino.** Es lo único que falta para cerrar el camino de
+   punta a punta contra EKS, y no depende de nosotros: ver [`pedido-jwks-eks.md`](pedido-jwks-eks.md).
+   En la misma ventana conviene cargar la cadena de la CA del destino en el Secret `destino-ca`
+   del origen, para poder validar TLS sin `insecureSkipVerify`.
 4. **Rotación de la clave** y `aud` por destino.
 5. **Observabilidad**: métricas por backend y trazas propagadas, que además son el criterio
    objetivo para avanzar de fase en el rollout.
@@ -138,4 +143,5 @@ Por orden de peso:
 | el detalle de los hallazgos, con evidencia | [HALLAZGOS.md](HALLAZGOS.md) |
 | correr la batería de escenarios | [`sim-destino/run-escenarios.sh`](sim-destino/run-escenarios.sh) |
 | montar el destino simulado | [`sim-destino/README.md`](sim-destino/README.md) |
+| lo que hay que pedirle al admin de EKS | [pedido-jwks-eks.md](pedido-jwks-eks.md) |
 | el workload que hace la cascada | [`../echoserver-cascada/`](../echoserver-cascada/) |
