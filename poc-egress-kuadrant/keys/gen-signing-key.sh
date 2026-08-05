@@ -11,23 +11,30 @@
 #   copia la clave PÚBLICA: si el cluster destino se ve comprometido, nadie
 #   puede falsificar tokens de salida.
 #
-# POR QUÉ RSA Y NO EC — medido en paas-arqlab (2026-08-05), RHCL 1.x:
-#   El emisor de wristband de Authorino firma ES256 sin problemas, pero su propio
-#   verificador `jwt` (go-oidc) está fijado a RS256 y NO hay campo en la AuthPolicy
-#   para declarar otros algoritmos. Con una clave EC, el destino rechaza el 100% de
-#   los tokens y el log dice:
+# POR QUÉ RSA EN PKCS#1 Y NO EC — medido en paas-arqlab (2026-08-05), RHCL 1.x.
+#   Hay DOS restricciones, y hay que cumplir las dos a la vez:
 #
-#     cannot validate identity ... reason:
-#       "oidc: malformed jwt: unexpected signature algorithm \"ES256\"; expected [\"RS256\"]"
+#   1. El verificador `jwt` de Authorino (go-oidc) está fijado a RS256 y no hay campo en
+#      la AuthPolicy para declarar otros algoritmos. Con una clave EC el destino rechaza
+#      el 100% de los tokens, y sólo se ve con el log en debug:
+#        cannot validate identity ... reason:
+#          "oidc: malformed jwt: unexpected signature algorithm \"ES256\"; expected [\"RS256\"]"
+#      El síntoma en el cliente es un 401 indistinguible de "falta el token", con el
+#      AuthConfig en Ready=True y el kid coincidiendo. Nada señala al algoritmo.
 #
-#   El síntoma en el cliente es un 401 indistinguible de "falta el token", y el
-#   AuthConfig queda Ready=True, así que nada señala al algoritmo. Es una asimetría
-#   dentro del mismo producto: firma EC, valida sólo RSA.
+#   2. El FIRMADOR acepta RS256 (está en el enum del CRD) pero sólo parsea la clave en
+#      formato legacy: SEC1 para EC, PKCS#1 para RSA. Con una clave RSA en PKCS#8 falla
+#      con "invalid signing key algorithm" — mensaje engañoso, porque el algoritmo es
+#      válido; lo que no puede es leer la clave. Y esa falla es peor que la anterior:
+#      deja el AuthConfig del EGRESO sin reconciliar, o sea que tumba el camino de la
+#      app entera, no sólo la validación en destino.
 #
-#   Cambiar a RSA conserva TODO el modelo de confianza de §2 del README — asimétrico,
-#   privada sólo en el origen, público pineado en el destino. Sólo cambia el algoritmo.
-#   Si algún día el verificador acepta EC, volver a ES256 es cambiar este script y el
-#   `algorithm:` de los AuthPolicy; nada más del diseño depende de eso.
+#   Conclusión: RSA 2048 en PKCS#1. Es la única combinación que cierra el lazo
+#   firma -> validación. `openssl genrsa` emite PKCS#8 desde OpenSSL 3.x, así que este
+#   script fuerza el formato y lo verifica.
+#
+#   El modelo de confianza de §2 del README no cambia: sigue siendo asimétrico, con la
+#   privada sólo en el origen y el público pineado en el destino.
 #
 # DÓNDE VA EL SECRET — verificado en paas-arqlab (2026-08):
 #   Kuadrant traduce cada AuthPolicy a un AuthConfig en `kuadrant-system`, sin
@@ -39,17 +46,16 @@
 #   Es el mismo motivo por el que el Secret de API key del smoke test de la guía
 #   de instalación de RHCL vive en `kuadrant-system`.
 #
-# Uso:  ./gen-signing-key.sh [kid] [namespace] [ES256|RS256]
+# Uso:  ./gen-signing-key.sh [kid] [namespace] [RS256|ES256]
 #
-# El algoritmo por defecto es ES256 porque es el ÚNICO que Authorino acepta para FIRMAR.
-# RS256 queda disponible para cuando el firmador lo soporte — hoy falla con
-# "invalid signing key algorithm" y deja el AuthConfig del egreso sin reconciliar, o sea
-# que tumba el camino de la app entera, no sólo la validación en destino.
+# El default es RS256, que es la ÚNICA combinación que cierra el lazo firma -> validación.
+# ES256 queda disponible sólo para reproducir el problema: firma bien y el destino lo
+# rechaza. Ver el bloque de arriba y README §2.
 set -euo pipefail
 
 KID="${1:-egress-echoserver-1}"
 NS="${2:-kuadrant-system}"
-ALG="${3:-ES256}"
+ALG="${3:-RS256}"
 OUT="$(cd "$(dirname "$0")" && pwd)/out"
 mkdir -p "$OUT"
 umask 077

@@ -60,26 +60,36 @@ entre clusters) usando un par **RSA 2048**: la **privada vive sólo en el cluste
 se le copia únicamente el **JWKS público**, servido desde un ConfigMap local. Ganás además que un
 compromiso del cluster destino no permite falsificar tokens de salida.
 
-> **RSA y no EC — corregido el 2026-08-05, medido en `paas-arqlab` con RHCL 1.x.** El diseño
-> original usaba EC P-256 / ES256. No funciona: el emisor de wristband de Authorino firma
-> ES256 sin problemas, pero **su propio verificador `jwt` (go-oidc) está fijado a RS256** y no
-> hay campo en la `AuthPolicy` para declarar otros algoritmos. El destino rechaza el 100% de
-> los tokens, y sólo se ve con el log de Authorino en `debug`:
+> **RSA 2048 en PKCS#1, no EC — corregido el 2026-08-05, medido en `paas-arqlab` con
+> RHCL 1.x.** El diseño original usaba EC P-256 / ES256 y **no cierra**. Hay dos
+> restricciones que hay que cumplir a la vez, y cada una tiene un síntoma engañoso distinto:
+>
+> **1. El verificador `jwt` sólo acepta RS256.** Está fijado en go-oidc y no hay campo en la
+> `AuthPolicy` para declarar otros algoritmos. Con EC, el destino rechaza el 100% de los
+> tokens y sólo se ve con el log de Authorino en `debug`:
 >
 > ```
 > cannot validate identity ... reason:
 >   "oidc: malformed jwt: unexpected signature algorithm \"ES256\"; expected [\"RS256\"]"
 > ```
 >
-> Lo caro del caso es cómo se presenta: **401 indistinguible de "falta el token"**, el
-> `AuthConfig` en `Ready=True`, el `kid` coincidiendo y el JWKS sirviéndose bien. Nada apunta
-> al algoritmo. Es una asimetría dentro del mismo producto: firma EC, valida sólo RSA.
+> En el cliente es un **401 indistinguible de "falta el token"**, con el `AuthConfig` en
+> `Ready=True`, el `kid` coincidiendo y el JWKS sirviéndose bien. Nada apunta al algoritmo.
 >
-> El cambio no toca el modelo de confianza — sigue siendo asimétrico, con la privada sólo en
-> el origen. Cambia el algoritmo en `keys/gen-signing-key.sh`, el `algorithm:` de `origen/05`
-> y `00-smoke-wristband/04`, y el JWK pasa de `crv/x/y` a `n/e`. **Aplica igual al destino
-> real**: EKS validando con Kuadrant habría fallado exactamente así, y el síntoma habría
-> aparecido recién con los dos clusters montados.
+> **2. El firmador acepta RS256 pero sólo lee la clave en formato legacy** — SEC1 para EC,
+> **PKCS#1** para RSA. Con una clave RSA en PKCS#8 (que es lo que `openssl genrsa` emite
+> desde OpenSSL 3.x) falla con `invalid signing key algorithm` — mensaje engañoso, porque el
+> algoritmo sí está en el enum del CRD; lo que no puede es parsear la clave. Y esta falla es
+> **peor que la anterior**: deja el `AuthConfig` del egreso sin reconciliar, el `ext_authz`
+> falla cerrado y **se cae el camino de la app entera**, no sólo la validación en destino.
+>
+> `keys/gen-signing-key.sh` fuerza PKCS#1 y lo verifica. Verificado end-to-end: `Enforced=True`,
+> cero errores de firma, y el token emitido con `alg: RS256`.
+>
+> El modelo de confianza no cambia — sigue siendo asimétrico, con la privada sólo en el
+> origen. **Aplica igual al destino real**: EKS validando con Kuadrant habría fallado
+> exactamente así, y el síntoma habría aparecido recién con los dos clusters montados y la
+> red abierta.
 
 **Corrección sobre "local al ns"** (verificado en `paas-arqlab`): esa parte de tu planteo no es
 alcanzable con Kuadrant. El operador traduce cada `AuthPolicy` a un `AuthConfig` en

@@ -41,7 +41,7 @@ spec:
                   value: server2
               signingKeyRefs:
                 - name: egress-echoserver-1
-                  algorithm: ES256
+                  algorithm: RS256
 ---
 # Requiere el Secret egress-echoserver-1 en el ns KUADRANT-SYSTEM (no en echoserver:
 # Kuadrant traduce este AuthPolicy a un AuthConfig en kuadrant-system y Authorino
