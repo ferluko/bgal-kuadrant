@@ -127,13 +127,18 @@ def main():
 
     problemas = []
 
-    # RS256 y no ES256: el verificador `jwt` de Authorino sólo acepta RS256 (medido el
-    # 2026-08-05 en paas-arqlab). Un token ES256 se valida bien acá y el destino lo rechaza
-    # igual, con un 401 que no señala al algoritmo — por eso el chequeo es duro.
-    if header.get("alg") != "RS256":
-        problemas.append(
-            f"alg={header.get('alg')!r}, se esperaba 'RS256'"
-            " — con cualquier otro, Authorino rechaza el token en el destino"
+    # Medido el 2026-08-05 en paas-arqlab (RHCL 1.x): Authorino FIRMA sólo ES* —con RS256 el
+    # AuthConfig del egreso ni reconcilia, "invalid signing key algorithm"— y su verificador
+    # `jwt` acepta sólo RS256. Es decir: Authorino no puede validar su propio wristband.
+    # Por eso acá se aceptan los dos y se avisa qué implica cada uno; ver README §2.
+    alg = header.get("alg")
+    if alg not in ("ES256", "ES384", "ES512", "RS256"):
+        problemas.append(f"alg={alg!r}, se esperaba ES256/ES384/ES512 o RS256")
+    elif alg.startswith("ES"):
+        print(
+            f"\n[!] alg={alg}: correcto para que Authorino FIRME, pero su verificador `jwt`\n"
+            "    sólo acepta RS256. El destino tiene que validar con Istio\n"
+            "    (RequestAuthentication, JWKS inline) — ver destino/13a y README §2."
         )
 
     now = int(time.time())

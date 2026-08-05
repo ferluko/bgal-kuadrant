@@ -39,44 +39,64 @@
 #   Es el mismo motivo por el que el Secret de API key del smoke test de la guía
 #   de instalación de RHCL vive en `kuadrant-system`.
 #
-# Uso:  ./gen-signing-key.sh [kid] [namespace]
+# Uso:  ./gen-signing-key.sh [kid] [namespace] [ES256|RS256]
+#
+# El algoritmo por defecto es ES256 porque es el ÚNICO que Authorino acepta para FIRMAR.
+# RS256 queda disponible para cuando el firmador lo soporte — hoy falla con
+# "invalid signing key algorithm" y deja el AuthConfig del egreso sin reconciliar, o sea
+# que tumba el camino de la app entera, no sólo la validación en destino.
 set -euo pipefail
 
 KID="${1:-egress-echoserver-1}"
 NS="${2:-kuadrant-system}"
+ALG="${3:-ES256}"
 OUT="$(cd "$(dirname "$0")" && pwd)/out"
 mkdir -p "$OUT"
 umask 077
 
-openssl genrsa -out "$OUT/key.pem" 2048 2>/dev/null
-
-# El JWK RSA necesita el módulo (n) y el exponente (e) en base64url. Se leen del propio
-# PEM con openssl para no depender de librerías de criptografía en el bastión.
-openssl rsa -in "$OUT/key.pem" -noout -modulus 2>/dev/null | sed 's/^Modulus=//' > "$OUT/modulus.hex"
-openssl rsa -in "$OUT/key.pem" -noout -text 2>/dev/null | grep -A1 -i 'publicExponent' | head -1 \
-  | sed -E 's/.*\(0x([0-9a-fA-F]+)\).*/\1/' > "$OUT/exponent.hex"
-
-python3 - "$OUT" "$KID" <<'PY'
+case "$ALG" in
+  ES256)
+    # SEC1 (`BEGIN EC PRIVATE KEY`) — es el formato con el que Authorino firma OK.
+    openssl ecparam -name prime256v1 -genkey -noout -out "$OUT/key.pem"
+    openssl ec -in "$OUT/key.pem" -pubout -outform DER -out "$OUT/pub.der" 2>/dev/null
+    python3 - "$OUT" "$KID" <<'PY'
+import base64, json, sys
+out, kid = sys.argv[1], sys.argv[2]
+der = open(f"{out}/pub.der", "rb").read()
+point = der[-65:]                      # SubjectPublicKeyInfo P-256: últimos 65 bytes
+assert point[0] == 0x04, "punto EC no comprimido esperado"
+b64u = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+jwk = {"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": kid,
+       "x": b64u(point[1:33]), "y": b64u(point[33:65])}
+json.dump({"keys": [jwk]}, open(f"{out}/jwks.json", "w"), indent=2)
+print("  JWK EC P-256 / ES256")
+PY
+    rm -f "$OUT/pub.der"
+    ;;
+  RS256)
+    openssl genrsa -out "$OUT/key.pem" 2048 2>/dev/null
+    openssl rsa -in "$OUT/key.pem" -noout -modulus 2>/dev/null | sed 's/^Modulus=//' > "$OUT/modulus.hex"
+    openssl rsa -in "$OUT/key.pem" -noout -text 2>/dev/null | grep -A1 -i 'publicExponent' | head -1 \
+      | sed -E 's/.*\(0x([0-9a-fA-F]+)\).*/\1/' > "$OUT/exponent.hex"
+    python3 - "$OUT" "$KID" <<'PY'
 import base64, json, sys
 out, kid = sys.argv[1], sys.argv[2]
 b64u = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
-
 n_hex = open(f"{out}/modulus.hex").read().strip()
 e_hex = open(f"{out}/exponent.hex").read().strip() or "10001"
 if len(e_hex) % 2:
     e_hex = "0" + e_hex
-
-n = bytes.fromhex(n_hex)
-n = n.lstrip(b"\x00") or b"\x00"        # el JWK no lleva el byte de signo del DER
+n = bytes.fromhex(n_hex).lstrip(b"\x00") or b"\x00"   # el JWK no lleva el byte de signo del DER
 e = bytes.fromhex(e_hex).lstrip(b"\x00") or b"\x01"
-
-jwk = {
-    "kty": "RSA", "alg": "RS256", "use": "sig", "kid": kid,
-    "n": b64u(n), "e": b64u(e),
-}
+jwk = {"kty": "RSA", "alg": "RS256", "use": "sig", "kid": kid, "n": b64u(n), "e": b64u(e)}
 json.dump({"keys": [jwk]}, open(f"{out}/jwks.json", "w"), indent=2)
 print(f"  JWK RSA: n={len(n)*8} bits, e=0x{e.hex()}")
 PY
+    rm -f "$OUT/modulus.hex" "$OUT/exponent.hex"
+    echo "  AVISO: hoy Authorino NO firma RS256 — 'invalid signing key algorithm'."
+    ;;
+  *) echo "algoritmo no soportado: $ALG (usar ES256 o RS256)"; exit 2 ;;
+esac
 
 # Secret para el cluster ORIGEN. Authorino espera la entrada "key.pem".
 #
