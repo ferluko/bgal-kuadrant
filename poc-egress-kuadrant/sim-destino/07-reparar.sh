@@ -47,8 +47,30 @@ except Exception as e:
 PY
 }
 
+# `.upstream.body` es un STRING cuando el hop 2 no devolvió JSON — típicamente una página de
+# error de Envoy ("upstream connect error…", "RBAC: access denied"). Indexarlo como objeto
+# revienta el jq y esconde la causa, así que se distingue el tipo antes.
 token_fresco() {
-  curl -s --max-time 15 -H "Host: $HOST" "$URL/" | jq -r '.upstream.body.request.headers["x-egress-token"] // empty'
+  curl -s --max-time 15 -H "Host: $HOST" "$URL/" \
+    | jq -r '.upstream.body | if type=="object" then (.request.headers["x-egress-token"] // empty) else empty end'
+}
+
+# Muestra qué está pasando realmente en el camino local. Se llama cuando no hay token.
+diagnostico_camino_local() {
+  local j; j=$(curl -s --max-time 15 -H "Host: $HOST" "$URL/")
+  inf "estado del camino local:"
+  jq -r '"     upstream.status = \(.upstream.status)
+     upstream.error  = \(.upstream.error // "-")
+     tipo de body    = \(.upstream.body | type)
+     body            = \(.upstream.body | if type=="object" then "(JSON ok)" else (tostring | .[0:300]) end)"' <<<"$j" 2>/dev/null \
+    || { inf "     la respuesta ni siquiera es JSON:"; printf '%s\n' "${j:0:300}" | sed 's/^/     /'; }
+  inf "estado de la AuthPolicy de EGRESO (la que firma):"
+  oc -n "$NS" get authpolicy egress-server2-jwt \
+    -o jsonpath='     Accepted={.status.conditions[?(@.type=="Accepted")].status} Enforced={.status.conditions[?(@.type=="Enforced")].status}{"\n"}' 2>/dev/null
+  inf "últimas líneas de Authorino sobre la firma:"
+  local A; A=$(oc -n kuadrant-system get deploy -o name 2>/dev/null | grep -i authorino | head -1)
+  oc -n kuadrant-system logs "$A" --since=5m 2>/dev/null \
+    | grep -iE 'wristband|signing|sign|denied|error' | tail -8 | sed 's/^/     /'
 }
 
 # ─────────────────────────────────────────────────────────────────────── A. el JWKS
@@ -107,7 +129,11 @@ SIMIP=$(oc -n "$NS_SIM" get svc ingress-sim-openshift-default -o jsonpath='{.spe
 [[ -n "$SIMIP" ]] && inf "ClusterIP del gateway simulado: $SIMIP" || { err "no se pudo leer la ClusterIP del gateway simulado"; exit 1; }
 
 TOK=$(token_fresco)
-[[ -n "$TOK" ]] || { err "no se pudo obtener un wristband desde $URL — revisar el camino local primero"; exit 1; }
+if [[ -z "$TOK" ]]; then
+  err "no se pudo obtener un wristband desde $URL"
+  diagnostico_camino_local
+  inf "el paso B (ServiceEntry) se aplica igual: es independiente de esto."
+fi
 ST=$(directo "$SIMIP" "$TOK")
 if [[ "$ST" == "200" ]]; then
   ok "token válido -> 200   ← REPARADO"
