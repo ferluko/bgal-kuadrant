@@ -38,7 +38,16 @@ spec:
   hosts:
     - app2.paas-demo.bancogalicia.com.ar
   location: MESH_EXTERNAL
-  resolution: DNS
+  # STATIC, no DNS — corregido tras la corrida del 2026-08-04.
+  #
+  # Con `resolution: DNS` el bloque `endpoints` NO pisó la resolución: Envoy resolvió el
+  # FQDN real por DNS a 172.19.105.122 (el NLB de EKS, que es inalcanzable) y el request
+  # colgó hasta el timeout del cliente — 5008 ms exactos contra UPSTREAM_TIMEOUT_MS=5000.
+  # El síntoma NO señala a DNS: se ve como un backend que no responde.
+  #
+  # `STATIC` con una IP no resuelve nada: usa el endpoint tal cual. Es la única forma
+  # segura de secuestrar un FQDN que YA resuelve a otra cosa.
+  resolution: STATIC
   ports:
     - number: 443
       name: http-for-tls-origination
@@ -50,11 +59,13 @@ spec:
   endpoints:
     # <<< ESTE BLOQUE ES LO ÚNICO QUE DISTINGUE LA SIMULACIÓN DE LA REALIDAD.
     #
-    # El Service del Gateway simulado sigue el patrón <gateway>-<gatewayclass> del
-    # controller openshift-default, igual que `egress-gw-openshift-default`. Se usa el FQDN
-    # y no la ClusterIP a propósito: la ClusterIP cambia si alguien recrea el Gateway, el
-    # nombre no. Con `resolution: DNS`, Envoy arma un cluster STRICT_DNS y lo resuelve solo.
-    - address: ingress-sim-openshift-default.echoserver-eks-sim.svc.cluster.local
+    # NO EDITAR A MANO: `07-reparar.sh` lo rellena con la ClusterIP real del Gateway
+    # simulado y aplica el resultado. La IP no se versiona porque cambia si se recrea el
+    # Gateway; el script la vuelve a leer cada vez.
+    #
+    # Tiene que ser una IP, no un FQDN: con `resolution: STATIC` Envoy no resuelve nada, y
+    # ese es justamente el punto (ver el comentario de `resolution` arriba).
+    - address: "0.0.0.0"   # <<< PLACEHOLDER — lo reemplaza 07-reparar.sh
       ports:
         http-for-tls-origination: 443
 ---
