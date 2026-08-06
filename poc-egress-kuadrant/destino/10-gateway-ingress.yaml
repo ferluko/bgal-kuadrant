@@ -43,7 +43,7 @@ spec:
       port: 443
       # SIN hostname, a propósito: el origen NO reescribe el Host (ver
       # origen/03-httproute-egress.yaml), así que el request llega con
-      # Host: server2.echoserver.svc.cluster.local. El listener matchea cualquier
+      # Host: backend.poc-egress-kuadrant.svc.cluster.local. El listener matchea cualquier
       # SNI y sirve el cert; el SNI (app2.paas-demo...) lo fija el DestinationRule
       # del origen, independiente del header Host.
       #
@@ -61,7 +61,7 @@ spec:
             kind: Secret
             name: paas-demo-wildcard-tls
 ---
-# Certificado: el wildcard *.paas-demo.bancogalicia.com.ar cubre app1 y app2
+# Certificado: el wildcard *.paas-demo.bancogalicia.com.ar cubre bff y app2
 # (un solo nivel de subdominio), así que sirve el mismo cert del banco en ambos
 # lados. Cargarlo como Secret TLS en el ns del Gateway:
 #

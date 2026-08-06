@@ -27,13 +27,13 @@
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
-  name: server2-ingress-jwt
+  name: backend-ingress-jwt
   namespace: echoserver
 spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: server2
+    name: backend
   rules:
     authentication:
       "egress-wristband":
@@ -55,16 +55,16 @@ spec:
             - predicate: |
                 auth.identity.src_cluster == "paas-arqlab"
             - predicate: |
-                auth.identity.src_namespace == "echoserver"
+                auth.identity.src_namespace == "poc-egress-kuadrant"
             - predicate: |
-                auth.identity.dst_service == "server2"
+                auth.identity.dst_service == "backend"
     response:
       unauthenticated:
         message:
           value: "falta o es invalido el token de egreso (x-egress-token)"
       unauthorized:
         message:
-          value: "el token de egreso no corresponde a un consumidor habilitado de server2"
+          value: "el token de egreso no corresponde a un consumidor habilitado de backend"
       success:
         # Propaga la procedencia al backend: útil para logs/trazas de la app.
         headers:
@@ -76,7 +76,7 @@ spec:
               expression: auth.identity.src_namespace
 ---
 # Verificación:
-#   oc -n echoserver get authpolicy server2-ingress-jwt \
+#   oc -n echoserver get authpolicy backend-ingress-jwt \
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
 # Notas de compatibilidad:

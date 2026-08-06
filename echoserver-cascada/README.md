@@ -1,9 +1,9 @@
 # Cascada de echo servers — simular BFF → backend
 
-`bastión → server → server2 → server (anida la respuesta) → bastión`
+`bastión → bff → backend → bff (anida la respuesta) → bastión`
 
 Workload base para las PoCs de red (ingress con Kuadrant, egreso con wristband, cutover
-del `Service server2`). Sirve para lo que un echo server suelto no puede probar: **que el
+del `Service backend`). Sirve para lo que un echo server suelto no puede probar: **que el
 salto interno efectivamente ocurrió**, con qué headers, contra qué IP y en cuánto tiempo.
 
 ## 1. Echo-Server de Ealenn no encadena
@@ -33,8 +33,8 @@ body), incluido el `x-egress-token` que inyecta la `AuthPolicy` de la PoC de egr
 
 | Hop | Workload | Imagen | Rol |
 |---|---|---|---|
-| 1 | `server` | `ubi9/python-312` + ConfigMap | BFF: refleja **y** llama al hop 2 |
-| 2 | `server2` | `ealen/echo-server:0.9.2` | backend, echo terminal sin adaptar |
+| 1 | `bff` | `ubi9/python-312` + ConfigMap | BFF: refleja **y** llama al hop 2 |
+| 2 | `backend` | `ealen/echo-server:0.9.2` | backend, echo terminal sin adaptar |
 
 El BFF son ~150 líneas de stdlib de Python montadas por ConfigMap: sin build, sin pip, sin
 registry propio. Devuelve el mismo esqueleto JSON que echo-server (`host` / `http` /
@@ -42,12 +42,12 @@ registry propio. Devuelve el mismo esqueleto JSON que echo-server (`host` / `htt
 
 ```jsonc
 {
-  "hop": "server",
-  "host": { "hostname": "server-xxx", "ip": "10.128.2.7", "ips": ["..."] },
+  "hop": "bff",
+  "host": { "hostname": "bff-xxx", "ip": "10.128.2.7", "ips": ["..."] },
   "http": { "method": "GET", "originalUrl": "/api/pedidos?id=42", "path": "/api/pedidos" },
   "request": { "query": {...}, "cookies": {}, "body": "", "headers": {...} },
   "upstream": {
-    "url": "http://server2.echoserver.svc.cluster.local:8080/api/pedidos?id=42",
+    "url": "http://backend.poc-egress-kuadrant.svc.cluster.local:8080/api/pedidos?id=42",
     "requestHeaders": {...},   // lo que el hop 1 mandó
     "status": 200,
     "headers": {...},
@@ -94,44 +94,44 @@ al hop 1.
 
 ## 3. Desplegar
 
-Respaldar primero el `server` actual, si existe:
+Respaldar primero el `bff` actual, si existe:
 
 ```bash
-oc -n echoserver get deploy server -o yaml > /tmp/server-deploy.bak.yaml
+oc -n poc-egress-kuadrant get deploy bff -o yaml > /tmp/bff-deploy.bak.yaml
 ```
 
-ConfigMap y `server2` van con `apply` sin vueltas:
+ConfigMap y `backend` van con `apply` sin vueltas:
 
 ```bash
-oc apply -n echoserver -f 00-configmap-bff.yaml -f 02-server2-echo.yaml
+oc apply -n poc-egress-kuadrant -f 00-configmap-bff.yaml -f 02-backend-echo.yaml
 ```
 
-**`server` NO va con `apply` si ya existe** — usar `replace --force`:
+**`bff` NO va con `apply` si ya existe** — usar `replace --force`:
 
 ```bash
-oc -n echoserver replace --force -f 01-server-bff.yaml
+oc -n poc-egress-kuadrant replace --force -f 01-bff.yaml
 ```
 
 > **Por qué, verificado en `paas-arqlab` (2026-08-04).** En la lista `containers` la
-> estrategia de merge es **por `name`**. Si el `server` original no fue creado con `apply`
+> estrategia de merge es **por `name`**. Si el `bff` original no fue creado con `apply`
 > (no tiene la anotación `kubectl.kubernetes.io/last-applied-configuration`), `oc apply` no
 > tiene cómo saber que el contenedor viejo sobra: **agrega `bff` y conserva el anterior**. El
 > pod queda con dos contenedores compartiendo el network namespace, los dos bindean `:8080`,
 > y el segundo muere con `EADDRINUSE` → exit 1 → **CrashLoopBackOff**, con el `bff` corriendo
 > sano al lado (pod en `1/2`).
 >
-> `replace --force` borra y recrea el Deployment: hay unos segundos sin `server`, irrelevante
+> `replace --force` borra y recrea el Deployment: hay unos segundos sin `bff`, irrelevante
 > en la PoC. Chequeo de que quedó un solo contenedor:
 >
 > ```bash
-> oc -n echoserver get pod -l app=server \
+> oc -n poc-egress-kuadrant get pod -l app=bff \
 >   -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}'
 > ```
 
-El manifiesto mantiene a propósito el label `app: server` y el puerto `8080`, así que el
-`Service server`, el `HTTPRoute app1` y las policies de Kuadrant siguen enganchando.
+El manifiesto mantiene a propósito el label `app: bff` y el puerto `8080`, así que el
+`Service bff`, el `HTTPRoute app1` y las policies de Kuadrant siguen enganchando.
 
-Si `server2` ya está desplegado no hace falta aplicar `02`: está para dejar documentada la
+Si `backend` ya está desplegado no hace falta aplicar `02`: está para dejar documentada la
 config con la que se probó — en particular `PORT=8080`, que **no es cosmético**: el default
 de la imagen es 80 y bajo `restricted-v2` (UID arbitrario) no puede bindear puerto
 privilegiado.
@@ -150,7 +150,7 @@ body, `X-ECHO-CODE: 503`, `X-ECHO-TIME: 2000`, timeout → 502, y `X-Cascade-Ski
 
 ### Entrando por el APIM (3scale / APIcast)
 
-El `server` se puede publicar como backend de un producto de 3scale en lugar de (o además
+El `bff` se puede publicar como backend de un producto de 3scale en lugar de (o además
 de) el `HTTPRoute` directo. La URL incluye el path del producto y las credenciales van por
 header:
 
@@ -160,7 +160,7 @@ HDRS='app_id: <app_id>;app_key: <app_key>' ./test-cascada.sh
 ```
 
 Verificado contra `echoserver-b2c` en `paas-arqlab` (2026-08-04): la cascada atraviesa
-APIcast sin cambios — `hop1 = server-…`, `hop2 = server2-564d58898-dhcpr`, `status 200`,
+APIcast sin cambios — `hop1 = bff-…`, `hop2 = backend-564d58898-dhcpr`, `status 200`,
 `10.4 ms`.
 
 Dos salvedades al correr el script completo por esta vía:
@@ -175,7 +175,7 @@ Dos salvedades al correr el script completo por esta vía:
 Un vistazo rápido de quién contestó en cada hop:
 
 ```bash
-curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/api/pedidos?id=42 \
+curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/api/pedidos?id=42 \
   | jq '{hop1: .host.hostname, hop2: .upstream.body.environment.HOSTNAME,
          hop2_vio_ip: .upstream.body.host.ip,
          status: .upstream.status, ms: .upstream.latencyMs}'
@@ -183,10 +183,10 @@ curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/api/pe
 
 > **Trampa de echo-server, verificada contra `0.9.2`:** en su salida `.host.hostname` es el
 > **header `Host`** del request y `.host.ip` es la **IP del cliente**. Ninguno de los dos
-> identifica al pod que atendió — con `Host: server2.echoserver.svc.cluster.local` el campo
+> identifica al pod que atendió — con `Host: backend.poc-egress-kuadrant.svc.cluster.local` el campo
 > `hostname` devuelve ese FQDN venga la respuesta del pod local o del cluster remoto. El
 > único dato del pod es `.environment.HOSTNAME`, y sólo aparece con `ENABLE__ENVIRONMENT=true`
-> (por eso `02-server2-echo.yaml` lo pone en `true`). Atajo equivalente:
+> (por eso `02-backend-echo.yaml` lo pone en `true`). Atajo equivalente:
 > `curl -H 'X-ECHO-ENV-BODY: HOSTNAME'` devuelve sólo el hostname como body.
 >
 > `.host.ip` sí es útil en la PoC de egreso, pero por otra razón: es la **IP de origen tal
@@ -194,9 +194,9 @@ curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/api/pe
 
 ## 5. Cómo se usa en las PoCs
 
-- **Egreso (`poc-egress-kuadrant`)** — el README dice que `server` consume
-  `http://server2.echoserver.svc.cluster.local:8080`; con esto **realmente lo consume**. El
-  cutover cambia el selector del `Service server2` al gateway de egreso y el BFF no se
+- **Egreso (`poc-egress-kuadrant`)** — el README dice que `bff` consume
+  `http://backend.poc-egress-kuadrant.svc.cluster.local:8080`; con esto **realmente lo consume**. El
+  cutover cambia el selector del `Service backend` al gateway de egreso y el BFF no se
   entera: mismo FQDN, misma ClusterIP. Lo que valida la migración es que
   `.upstream.body.request.headers["x-egress-token"]` aparezca y que
   `.upstream.body.environment.HOSTNAME` pase a ser un pod del cluster destino.
@@ -221,15 +221,15 @@ y después con el **hop 2 corriendo la imagen real `docker.io/ealen/echo-server:
 - upstream caído → `502` con `URLError: Connection refused`;
 - `X-Cascade-Skip: 1` y `/healthz` sin encadenar;
 - cascada de 3 niveles: `X-Echo-Depth` incrementando (1, 2) y `X-Cascade-Via` acumulando
-  (`server`, `server,server2b`).
+  (`bff`, `bff,server2b`).
 
 **En `paas-arqlab` (OCP 4.20, 2026-08-04)** quedó verificada la cascada de punta a punta,
-entrando por el APIM (`echoserver-b2c` → APIcast → `server`):
+entrando por el APIM (`echoserver-b2c` → APIcast → `bff`):
 
 - pull de `ubi9/python-312:1`, montaje del ConfigMap y arranque bajo `restricted-v2` con
   `runAsNonRoot` + `readOnlyRootFilesystem` + `drop: ALL`;
 - hop 1 → hop 2 por el FQDN del Service, `status 200` en **10,4 ms**;
-- identificación de los dos pods (`server-…` / `server2-564d58898-dhcpr`), con
+- identificación de los dos pods (`bff-…` / `backend-564d58898-dhcpr`), con
   `.upstream.body.environment.HOSTNAME` resolviendo correcto en el hop 2;
 - IP de origen vista por el hop 2 (`::ffff:10.131.1.196`) — la línea de base pre-cutover
   para la PoC de egreso.

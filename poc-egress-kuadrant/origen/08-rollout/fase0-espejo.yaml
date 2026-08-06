@@ -9,7 +9,7 @@
 #
 # ADVERTENCIAS:
 #  - El espejo DUPLICA ESCRITURAS. Sólo apto si el tráfico es idempotente o si el
-#    server2 del destino escribe contra un backing store separado.
+#    backend del destino escribe contra un backing store separado.
 #  - Istio no soporta mirror.percent en Gateway API (istio#49999): el espejo es
 #    100% del tráfico y duplica la carga sobre el destino. Dimensionar antes.
 #  - Verificar que el header x-egress-token viaje también en la copia espejada
@@ -18,8 +18,8 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: egress-server2
-  namespace: echoserver
+  name: egress-backend
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/fase: "0-espejo"
 spec:
@@ -27,10 +27,10 @@ spec:
     - name: egress-gw
       sectionName: mesh-internal
   hostnames:
-    - "server2"
-    - "server2.echoserver"
-    - "server2.echoserver.svc"
-    - "server2.echoserver.svc.cluster.local"
+    - "backend"
+    - "backend.poc-egress-kuadrant"
+    - "backend.poc-egress-kuadrant.svc"
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
   rules:
     - name: default
       matches:
@@ -46,7 +46,7 @@ spec:
               name: app2.paas-demo.bancogalicia.com.ar
               port: 443
       backendRefs:
-        - name: server2-local
+        - name: backend-local
           port: 8080
 ---
 # Criterio para avanzar a la fase 1:

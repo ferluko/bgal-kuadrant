@@ -8,20 +8,20 @@
 # Kuadrant lo traduce a un AuthConfig en `kuadrant-system`, y Authorino resuelve
 # signingKeyRefs contra el ns del AUTHCONFIG. El Secret va en `kuadrant-system`.
 #
-# El cliente (server) no manda ninguna credencial y no se modifica: por eso la
+# El cliente (bff) no manda ninguna credencial y no se modifica: por eso la
 # autenticación de entrada al gateway de egreso es anonymous. Quién puede llegar
 # al gateway se restringe por NetworkPolicy (07) — ver §8 del README para el
 # endurecimiento a identidad de workload (mTLS / SA token).
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
-  name: egress-server2-jwt
-  namespace: echoserver
+  name: egress-backend-jwt
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: egress-server2
+    name: egress-backend
   rules:
     authentication:
       "workload-interno":
@@ -46,22 +46,22 @@ spec:
                 "src_cluster":
                   value: paas-arqlab
                 "src_namespace":
-                  value: echoserver
+                  value: poc-egress-kuadrant
                 "src_service":
-                  value: server
+                  value: bff
                 "dst_service":
-                  value: server2
+                  value: backend
               signingKeyRefs:
                 - name: egress-echoserver-1
                   algorithm: RS256
 ---
 # Verificación:
-#   oc -n echoserver get authpolicy egress-server2-jwt \
+#   oc -n poc-egress-kuadrant get authpolicy egress-backend-jwt \
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
 # El Secret egress-echoserver-1 lo genera keys/gen-signing-key.sh y DEBE vivir en
 # `kuadrant-system`. Si falta o está en otro ns, el síntoma es:
-#   oc -n echoserver get authpolicy egress-server2-jwt \
+#   oc -n poc-egress-kuadrant get authpolicy egress-backend-jwt \
 #     -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #   -> "AuthPolicy waiting for the following components to sync: [AuthConfig (...)]"
 #   oc -n kuadrant-system logs deploy/authorino | grep 'Reconciler error'

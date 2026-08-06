@@ -2,7 +2,7 @@
 #
 # Sólo los requests que traen `x-canary: true` cruzan al cluster destino; todo lo
 # demás se sigue sirviendo localmente. Permite correr la suite funcional y las
-# pruebas de los equipos contra el server2 migrado, en el camino real de red y
+# pruebas de los equipos contra el backend migrado, en el camino real de red y
 # con el JWT real, sin tocar a ningún consumidor.
 #
 # Precedencia de Gateway API: una rule con match de header es más específica que
@@ -10,8 +10,8 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: egress-server2
-  namespace: echoserver
+  name: egress-backend
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/fase: "1-canary-header"
 spec:
@@ -19,10 +19,10 @@ spec:
     - name: egress-gw
       sectionName: mesh-internal
   hostnames:
-    - "server2"
-    - "server2.echoserver"
-    - "server2.echoserver.svc"
-    - "server2.echoserver.svc.cluster.local"
+    - "backend"
+    - "backend.poc-egress-kuadrant"
+    - "backend.poc-egress-kuadrant.svc"
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
   rules:
     - name: canary
       matches:
@@ -44,16 +44,16 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: server2-local
+        - name: backend-local
           port: 8080
 ---
 # Prueba:
-#   oc -n echoserver exec deploy/server -- curl -s -H 'x-canary: true' \
-#     http://server2.echoserver.svc.cluster.local:8080/     # -> pod del DESTINO
-#   oc -n echoserver exec deploy/server -- curl -s -H 'x-canary: true' \
-#     http://server2:8080/                                  # -> pod del DESTINO
-#   oc -n echoserver exec deploy/server -- curl -s \
-#     http://server2.echoserver.svc.cluster.local:8080/     # -> pod LOCAL
+#   oc -n poc-egress-kuadrant exec deploy/bff -- curl -s -H 'x-canary: true' \
+#     http://backend.poc-egress-kuadrant.svc.cluster.local:8080/     # -> pod del DESTINO
+#   oc -n poc-egress-kuadrant exec deploy/bff -- curl -s -H 'x-canary: true' \
+#     http://backend:8080/                                  # -> pod del DESTINO
+#   oc -n poc-egress-kuadrant exec deploy/bff -- curl -s \
+#     http://backend.poc-egress-kuadrant.svc.cluster.local:8080/     # -> pod LOCAL
 #
 # Criterio para avanzar a la fase 2: suite funcional completa en verde contra el
 # destino, incluyendo casos de error y timeouts.

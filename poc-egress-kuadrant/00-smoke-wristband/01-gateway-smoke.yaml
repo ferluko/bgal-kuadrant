@@ -6,7 +6,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: smoke-gw
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     kuadrant.io/gateway: "true"
   annotations:
@@ -26,9 +26,9 @@ spec:
           from: Same
 ---
 # Verificar antes de seguir:
-#   oc -n echoserver get gateway smoke-gw \
+#   oc -n poc-egress-kuadrant get gateway smoke-gw \
 #     -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}{"\n"}'
-#   oc -n echoserver get svc -l gateway.networking.k8s.io/gateway-name=smoke-gw
+#   oc -n poc-egress-kuadrant get svc -l gateway.networking.k8s.io/gateway-name=smoke-gw
 #
 # El nombre del Service generado (esperado: smoke-gw-openshift-default) es el
 # endpoint contra el que se hacen los curl del test.
@@ -43,7 +43,7 @@ spec:
 #   ---
 #   apiVersion: v1
 #   kind: ConfigMap
-#   metadata: {name: smoke-gw-options, namespace: echoserver}
+#   metadata: {name: smoke-gw-options, namespace: poc-egress-kuadrant}
 #   data:
 #     service: |
 #       spec:

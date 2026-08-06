@@ -2,12 +2,12 @@
 #
 # La app manda HTTP plano; el gateway abre TLS contra el cluster destino.
 # Esto es lo que hace que el "salto entre clusters" viaje cifrado sin tocar
-# una línea de código de server.
+# una línea de código del bff.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
-  name: server2-destino-tls
-  namespace: echoserver
+  name: backend-destino-tls
+  namespace: poc-egress-kuadrant
 spec:
   # <<< PLACEHOLDER: mismo FQDN que el ServiceEntry
   host: app2.paas-demo.bancogalicia.com.ar
@@ -69,6 +69,6 @@ spec:
 #     --from-file=ca.crt=./ca-interna-galicia.pem
 #
 # El `sni` es lo que hace que todo esto funcione sin reescribir el Host: el request
-# viaja con Host: server2.echoserver.svc.cluster.local pero abre TLS anunciando
+# viaja con Host: backend.poc-egress-kuadrant.svc.cluster.local pero abre TLS anunciando
 # app2.paas-demo.bancogalicia.com.ar, que es lo que el NLB/Envoy del destino esperan
 # y lo que el certificado wildcard cubre.

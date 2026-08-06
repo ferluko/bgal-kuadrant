@@ -19,14 +19,14 @@ CTX_ORI="${CTX_ORI:-}"
 CTX_DST="${CTX_DST:-}"
 DST_IP="${DST_IP:-10.254.34.2}"                            # ingress VIP de paas-dev1-lowmz
 FQDN="${FQDN:-app2.paas-demo.bancogalicia.com.ar}"
-NS="${NS:-echoserver}"                                     # ns en el origen
+NS="${NS:-poc-egress-kuadrant}"                                     # ns en el origen
 NS_DST="${NS_DST:-echoserver}"                             # ns en el destino
-HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
+HOST_INTERNO="${HOST_INTERNO:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
 CERT_SECRET="${CERT_SECRET:-paas-demo-wildcard-tls}"
 GW="${GW:-ingress-gw}"
 LISTENER="${LISTENER:-https}"
-ROUTE="${ROUTE:-server2}"
-POLICY="${POLICY:-server2-ingress-jwt}"
+ROUTE="${ROUTE:-backend}"
+POLICY="${POLICY:-backend-ingress-jwt}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -t 1 ]]; then V=$'\e[32m'; R=$'\e[31m'; A=$'\e[33m'; B=$'\e[1m'; D=$'\e[2m'; Z=$'\e[0m'
@@ -44,7 +44,7 @@ oco() { oc ${CTX_ORI:+--context="$CTX_ORI"} "$@"; }
 ocd() { oc ${CTX_DST:+--context="$CTX_DST"} "$@"; }
 
 # Sonda de red desde un pod del ORIGEN hacia la VIP del destino. Va por `oc exec` al pod
-# `server` (tiene python3) en vez de crear un pod por prueba: es más rápido y no depende
+# `bff` (tiene python3) en vez de crear un pod por prueba: es más rápido y no depende
 # de que la imagen de debug traiga curl ni de que el admission del cluster acepte `oc debug`.
 #
 # Devuelve un JSON con todo lo que importa de una sola pasada: tiempo de TCP, tiempo del
@@ -52,7 +52,7 @@ ocd() { oc ${CTX_DST:+--context="$CTX_DST"} "$@"; }
 # más valioso— el skew de reloj contra el destino, leído del header `Date` de la respuesta.
 sonda() {
   local tok="${1-}"
-  oco -n "$NS" exec -i deploy/server -- python3 - "$DST_IP" "$FQDN" "$HOST_INTERNO" "$tok" <<'PY' 2>/dev/null || echo '{"error":"no se pudo ejecutar en deploy/server"}'
+  oco -n "$NS" exec -i deploy/bff -- python3 - "$DST_IP" "$FQDN" "$HOST_INTERNO" "$tok" <<'PY' 2>/dev/null || echo '{"error":"no se pudo ejecutar en deploy/bff"}'
 import http.client, json, re, socket, ssl, sys, time
 from email.utils import parsedate_to_datetime
 
@@ -189,7 +189,7 @@ eq "permiso para Route con host propio" "${CH:-no}" "yes"
 esc "P3 — El origen puede emitir tokens" \
     "que haya wristband para probar: sin esto el destino no se puede validar de punta a punta"
 
-AP=$(oco -n "$NS" get authpolicy egress-server2-jwt \
+AP=$(oco -n "$NS" get authpolicy egress-backend-jwt \
       -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
 eq "AuthPolicy de egreso Accepted/Enforced" "${AP:-ausente}" "True/True"
 
@@ -211,7 +211,7 @@ fi
 esc "P4 — Estado del DNS" \
     "informativo: a dónde apunta hoy app2, para saber qué cambia el corte del CNAME"
 
-RES=$(oco -n "$NS" exec -i deploy/server -- python3 -c \
+RES=$(oco -n "$NS" exec -i deploy/bff -- python3 -c \
   "import socket,sys;print(socket.gethostbyname('$FQDN'))" 2>/dev/null || echo "no resuelve")
 nota "$FQDN resuelve HOY desde un pod del origen a: $RES"
 if [[ "$RES" == "$DST_IP" ]]; then
@@ -256,8 +256,8 @@ else
                            || { bad "HTTPRoute adoptado por el Gateway" "${ACC:-sin condición Accepted}" "True"
                                 nota "status completo: $(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status} {end}{end}' 2>/dev/null)"
                                 nota "sólo condiciones kuadrant.io/* => el problema está en el Gateway, no en la policy"; }
-    [[ "$RR" == *True* ]] && ok "backendRef server2:8080 resuelve" "ResolvedRefs=True" \
-                          || bad "backendRef server2:8080 resuelve" "${RR:-null}" "True"
+    [[ "$RR" == *True* ]] && ok "backendRef backend:8080 resuelve" "ResolvedRefs=True" \
+                          || bad "backendRef backend:8080 resuelve" "${RR:-null}" "True"
   else
     skip "HTTPRoute $ROUTE" "todavía no aplicado"
   fi

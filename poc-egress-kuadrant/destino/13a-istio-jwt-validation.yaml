@@ -65,7 +65,7 @@ spec:
         - key: request.auth.claims[src_namespace]
           values: ["echoserver"]
         - key: request.auth.claims[dst_service]
-          values: ["server2"]
+          values: ["backend"]
 ---
 # Verificación:
 #   kubectl -n echoserver get requestauthentication egress-origen -o yaml

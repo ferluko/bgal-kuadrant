@@ -1,4 +1,4 @@
-# FASE 0a — SOLO LOCAL. 100% del tráfico al `server2` de ESTE cluster.
+# FASE 0a — SOLO LOCAL. 100% del tráfico al `backend` de ESTE cluster.
 #
 # Estado base de la PoC mientras el cluster destino TODAVÍA NO EXISTE. Sustituye a
 # 03-httproute-egress.yaml (que es el estado base inverso: 100% al destino) y se aplica
@@ -32,12 +32,12 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: egress-server2
-  namespace: echoserver
+  name: egress-backend
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/fase: "0a-solo-local"
     poc.galicia.io/destino: "ninguno — el cluster EKS todavía no existe"
-    poc.galicia.io/rollback: "oc -n echoserver patch svc server2 --type merge -p '{\"spec\":{\"selector\":{\"app\":\"server2\"}}}'"
+    poc.galicia.io/rollback: "oc -n poc-egress-kuadrant patch svc backend --type merge -p '{\"spec\":{\"selector\":{\"app\":\"backend\"}}}'"
 spec:
   parentRefs:
     # Sin `namespace`: hereda el de la route. Tiene que coincidir con el del Gateway porque el
@@ -47,10 +47,10 @@ spec:
   hostnames:
     # El listener no restringe hostname (01-gateway-egress.yaml); declarar todas las
     # autoridades que pueden enviar los clientes permite conservar la URL original.
-    - "server2"
-    - "server2.echoserver"
-    - "server2.echoserver.svc"
-    - "server2.echoserver.svc.cluster.local"
+    - "backend"
+    - "backend.poc-egress-kuadrant"
+    - "backend.poc-egress-kuadrant.svc"
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
   rules:
     - name: default
       matches:
@@ -58,43 +58,43 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        # ÚNICO backend, y es `server2-local` (06), NO `server2`: después del cutover (09) el
-        # Service `server2` selecciona los pods del PROPIO gateway, así que apuntar acá a
-        # `server2` produce un loop infinito Envoy <-> kube-proxy. Ningún contador de la app lo
+        # ÚNICO backend, y es `backend-local` (06), NO `backend`: después del cutover (09) el
+        # Service `backend` selecciona los pods del PROPIO gateway, así que apuntar acá a
+        # `backend` produce un loop infinito Envoy <-> kube-proxy. Ningún contador de la app lo
         # frena: el MAX_DEPTH del BFF cuenta hops de aplicación y el ciclo ocurre entero por
         # debajo. Cada vuelta además dispara una firma RS256 en Authorino.
         #
         # Sin `weight`: con un solo backendRef no aporta nada. Se agrega cuando aparezca el
         # segundo backend, en fase2-pesos.yaml.
-        - name: server2-local
+        - name: backend-local
           port: 8080
 ---
 # ------------------------------------------------------------------------------------------
 # VERIFICACIONES
 #
-# 1) Las DOS condiciones en True. Un ResolvedRefs=False acá significa que `server2-local` no
+# 1) Las DOS condiciones en True. Un ResolvedRefs=False acá significa que `backend-local` no
 #    existe o no publica el 8080; no hay backend remoto que pueda ensuciar el status.
 #
-#   oc -n echoserver get httproute egress-server2 \
+#   oc -n poc-egress-kuadrant get httproute egress-backend \
 #     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 #   -> Accepted=True(Accepted) ResolvedRefs=True(ResolvedRefs)
 #
 # 2) ASSERT ANTI-LOOP. Correr SIEMPRE antes del cutover (09) y después de cada reaplique:
 #
-#   oc -n echoserver get httproute egress-server2 -o jsonpath='{.spec.rules[*].backendRefs[*].name}{"\n"}'
-#   -> server2-local        (si dice "server2", NO hacer el cutover)
+#   oc -n poc-egress-kuadrant get httproute egress-backend -o jsonpath='{.spec.rules[*].backendRefs[*].name}{"\n"}'
+#   -> backend-local        (si dice "backend", NO hacer el cutover)
 #
 # 3) El camino a mano, ANTES del cutover, con las DOS formas del Host. La segunda es la que
-#    manda el cliente real: el BFF llama a http://server2...:8080 y urllib arma
-#    `Host: server2.echoserver.svc.cluster.local:8080` — CON puerto, porque no es el 80
+#    manda el cliente real: el BFF llama a http://backend...:8080 y urllib arma
+#    `Host: backend.poc-egress-kuadrant.svc.cluster.local:8080` — CON puerto, porque no es el 80
 #    (verificado en la corrida local del BFF: el hop 2 recibió `host: 127.0.0.1:9002`).
 #    Todas las demás verificaciones del repo curlean sin el puerto y por eso no cubren el caso.
 #
-#   for H in 'server2.echoserver.svc.cluster.local' 'server2.echoserver.svc.cluster.local:8080'; do
-#     oc -n echoserver run c$RANDOM --rm -i --restart=Never \
+#   for H in 'backend.poc-egress-kuadrant.svc.cluster.local' 'backend.poc-egress-kuadrant.svc.cluster.local:8080'; do
+#     oc -n poc-egress-kuadrant run c$RANDOM --rm -i --restart=Never \
 #       --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
 #       curl -sS -o /dev/null -w "$H -> %{http_code}\n" -H "Host: $H" \
-#       http://egress-gw-openshift-default.echoserver.svc.cluster.local:8080/
+#       http://egress-gw-openshift-default.poc-egress-kuadrant.svc.cluster.local:8080/
 #   done
 #   -> 200 las dos. Si la del :8080 da 404, este Istio no normaliza el puerto contra el
 #      `hostname` del listener: quitar `hostname` del listener (01) y dejar el matching a las
@@ -104,14 +104,14 @@ spec:
 #    con MIRROR_UPSTREAM_STATUS=false, así que un 404 o un 503 del gateway salen como HTTP 200
 #    hacia afuera, con el error escondido adentro del JSON.
 #
-#   curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
+#   curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
 #     | jq '{st: .upstream.status, ms: .upstream.latencyMs,
 #            pod: .upstream.body.environment.HOSTNAME,
 #            srcip: .upstream.body.host.ip,
 #            token: (.upstream.body.request.headers["x-egress-token"] != null)}'
 #
 #   st=200, `pod` = el MISMO pod local que antes del cutover (el destino no cambió, sólo el
-#   camino), y `srcip` = IP del pod del GATEWAY en vez de la del pod `server`. Ese cambio de
+#   camino), y `srcip` = IP del pod del GATEWAY en vez de la del pod `bff`. Ese cambio de
 #   srcip es la única prueba directa de que la intercepción tomó efecto.
 #
 # 5) Rollback de esta fase: no hace falta tocar la route. El rollback es el del cutover, un
@@ -121,12 +121,12 @@ spec:
 # NOTA — cómo probar `kind: Hostname` + `weight` sin cluster destino, SIN meterlo acá:
 #   route descartable, con nombre propio, sobre un gateway efímero, apuntando a un host que YA
 #   está en el registry (no necesita ServiceEntry, ni DNS, ni TLS origination):
-#     - name: server2-local
+#     - name: backend-local
 #       port: 8080
 #       weight: 90
 #     - group: networking.istio.io
 #       kind: Hostname
-#       name: server2-local.echoserver.svc.cluster.local
+#       name: backend-local.poc-egress-kuadrant.svc.cluster.local
 #       port: 8080
 #       weight: 10
 #   Responde "¿el controller acepta kind: Hostname, y acepta weight sobre él?" sin poner un

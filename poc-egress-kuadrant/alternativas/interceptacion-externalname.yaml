@@ -1,12 +1,12 @@
 # FALLBACK de origen/09-cutover-service-selector.yaml
 #
 # Usar SÓLO si la verificación bloqueante del README §5 muestra que los pods del
-# gateway NO corren en el namespace `echoserver` (por ejemplo, en openshift-ingress):
+# gateway NO corren en el namespace `poc-egress-kuadrant` (por ejemplo, en openshift-ingress):
 #
 #   oc get pods -A -l gateway.networking.k8s.io/gateway-name=gw-one -o wide
 #
 # Los selectores de Service son namespace-scoped, así que en ese caso ningún
-# Service de echoserver puede seleccionar esos pods y la intercepción por selector
+# Service de poc-egress-kuadrant puede seleccionar esos pods y la intercepción por selector
 # no es posible. El Service GENERADO por el Gateway sí vive en el ns del Gateway
 # aunque sus pods no, así que se lo puede alcanzar por DNS.
 #
@@ -21,21 +21,21 @@
 # El resto del plan no cambia: las fases de 08-rollout/, los pesos y el rollback
 # por peso funcionan igual.
 #
-#   oc -n echoserver get svc server2 -o yaml > /tmp/server2-svc.bak.yaml   # rollback
-#   oc -n echoserver delete svc server2
+#   oc -n poc-egress-kuadrant get svc backend -o yaml > /tmp/backend-svc.bak.yaml   # rollback
+#   oc -n poc-egress-kuadrant delete svc backend
 #   oc apply -f alternativas/interceptacion-externalname.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: server2
-  namespace: echoserver
+  name: backend
+  namespace: poc-egress-kuadrant
   annotations:
-    poc.galicia.io/rollback: "oc -n echoserver delete svc server2 && oc apply -f /tmp/server2-svc.bak.yaml"
+    poc.galicia.io/rollback: "oc -n poc-egress-kuadrant delete svc backend && oc apply -f /tmp/backend-svc.bak.yaml"
 spec:
   type: ExternalName
   # <<< AJUSTAR al nombre real del Service generado por el Gateway:
-  #   oc -n echoserver get svc -l gateway.networking.k8s.io/gateway-name=egress-gw
-  externalName: egress-gw-openshift-default.echoserver.svc.cluster.local
+  #   oc -n poc-egress-kuadrant get svc -l gateway.networking.k8s.io/gateway-name=egress-gw
+  externalName: egress-gw-openshift-default.poc-egress-kuadrant.svc.cluster.local
 ---
 # ExternalName NO remapea puertos: el gateway DEBE escuchar en 8080, que es lo que
 # hace el listener de origen/01-gateway-egress.yaml.

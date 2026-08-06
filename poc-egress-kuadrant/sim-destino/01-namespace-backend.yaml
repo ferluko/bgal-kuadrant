@@ -1,4 +1,4 @@
-# Destino SIMULADO — el `server2` "remoto".
+# Destino SIMULADO — el `backend` "remoto".
 #
 # Namespace aparte para que sea inconfundible cuál de los dos contestó, y para que las
 # NetworkPolicies del origen (07) no lo alcancen por accidente.
@@ -9,7 +9,7 @@
 #
 #   jq -r '.upstream.body.environment.SIM_SITE // "local"'
 #
-# `ENABLE__ENVIRONMENT=true` es obligatorio para eso — igual que en el server2 local.
+# `ENABLE__ENVIRONMENT=true` es obligatorio para eso — igual que en el backend local.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -20,20 +20,20 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: server2
+  name: backend
   namespace: echoserver-eks-sim
   labels:
-    app: server2
+    app: backend
     poc.galicia.io/rol: destino-simulado
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: server2
+      app: backend
   template:
     metadata:
       labels:
-        app: server2
+        app: backend
         poc.galicia.io/rol: destino-simulado
     spec:
       containers:
@@ -48,7 +48,7 @@ spec:
               value: "true"
             - name: ENABLE__FILE
               value: "false"
-            # Marcador para distinguirlo del server2 local en el conteo del reparto.
+            # Marcador para distinguirlo del backend local en el conteo del reparto.
             - name: SIM_SITE
               value: eks-sim
           ports:
@@ -73,14 +73,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: server2
+  name: backend
   namespace: echoserver-eks-sim
   labels:
-    app: server2
+    app: backend
 spec:
   type: ClusterIP
   selector:
-    app: server2
+    app: backend
   ports:
     - name: server-port
       port: 8080

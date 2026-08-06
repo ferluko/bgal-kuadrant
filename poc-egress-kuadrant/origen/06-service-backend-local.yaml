@@ -1,10 +1,10 @@
-# Cluster ORIGEN — Service ADITIVO hacia los pods reales de server2.
+# Cluster ORIGEN — Service ADITIVO hacia los pods reales de backend.
 #
 # No modifica nada existente: crea un segundo Service que selecciona exactamente
-# los mismos pods que hoy selecciona `server2`. El Deployment server2 NO se toca:
+# los mismos pods que hoy selecciona `backend`. El Deployment backend NO se toca:
 # sigue corriendo con sus labels originales.
 #
-# Es el backend "viejo" del canary. Una vez que el Service `server2` pase a apuntar
+# Es el backend "viejo" del canary. Una vez que el Service `backend` pase a apuntar
 # al gateway de egreso (09), este es el único camino para volver a los pods locales,
 # y es el backendRef local de las fases de 08-rollout-progresivo.yaml.
 #
@@ -12,32 +12,32 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: server2-local
-  namespace: echoserver
+  name: backend-local
+  namespace: poc-egress-kuadrant
   labels:
     poc.galicia.io/rol: backend-local-canary
 spec:
   type: ClusterIP
-  # Idéntico al selector actual del Service server2 (verificado en paas-arqlab:
-  # {"app":"server2"}), para que seleccione exactamente los mismos pods.
+  # Idéntico al selector actual del Service backend (verificado en paas-arqlab:
+  # {"app":"backend"}), para que seleccione exactamente los mismos pods.
   selector:
-    app: server2
+    app: backend
   ports:
     - name: server-port
       port: 8080
       targetPort: 8080
       protocol: TCP
-      # A diferencia del Service `server2` —que consume kube-proxy directo— este Service es
+      # A diferencia del Service `backend` —que consume kube-proxy directo— este Service es
       # backendRef de una HTTPRoute, así que Istio construye el cluster upstream a partir de
       # este puerto. `server-port` no es un nombre de protocolo conocido para Istio: con HTTP/1.1
       # plano funciona igual, lo que se degrada es la clasificación L7 (telemetría, y cualquier
       # upgrade futuro a h2c/gRPC). Declararlo es aditivo y no afecta al Service existente.
       appProtocol: http
 ---
-# Verificación — tiene que devolver las MISMAS IPs que el Service server2 actual:
-#   oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2-local \
+# Verificación — tiene que devolver las MISMAS IPs que el Service backend actual:
+#   oc -n poc-egress-kuadrant get endpointslice -l kubernetes.io/service-name=backend-local \
 #     -o jsonpath='{.items[*].endpoints[*].addresses[*]}{"\n"}'
-#   oc -n echoserver get endpointslice -l kubernetes.io/service-name=server2 \
+#   oc -n poc-egress-kuadrant get endpointslice -l kubernetes.io/service-name=backend \
 #     -o jsonpath='{.items[*].endpoints[*].addresses[*]}{"\n"}'
 #
 # Si difieren, el selector está mal y el canary mandaría tráfico a ningún lado.

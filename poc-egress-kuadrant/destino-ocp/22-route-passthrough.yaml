@@ -9,7 +9,7 @@
 #
 # El egreso NO reescribe el Host (README §4). El request que sale del origen viaja así:
 #
-#     Host: server2.echoserver.svc.cluster.local:8080     <- el del cliente original
+#     Host: backend.poc-egress-kuadrant.svc.cluster.local:8080     <- el del cliente original
 #     SNI:  app2.paas-demo.bancogalicia.com.ar            <- lo fija origen/04 (DestinationRule)
 #
 # Y el router elige el backend con criterios distintos según la terminación:
@@ -21,7 +21,7 @@
 #                       modelo de confianza del diseño con NLB en passthrough.
 #
 #   edge / reencrypt -> HAProxy termina TLS y elige por el header **Host**, que acá es
-#                       `server2.echoserver.svc.cluster.local:8080`. Ninguna Route del
+#                       `backend.poc-egress-kuadrant.svc.cluster.local:8080`. Ninguna Route del
 #                       cluster declara ese host: **503 del router**, y el síntoma no
 #                       señala a la causa. Además el origen pasaría a validar el
 #                       certificado del router en vez del del gateway — el mismo problema
@@ -107,7 +107,7 @@ spec:
 #
 #   curl -sS -o /dev/null -w '%{http_code}\n' \
 #     --resolve app2.paas-demo.bancogalicia.com.ar:443:10.254.34.2 \
-#     -H 'Host: server2.echoserver.svc.cluster.local:8080' \
+#     -H 'Host: backend.poc-egress-kuadrant.svc.cluster.local:8080' \
 #     https://app2.paas-demo.bancogalicia.com.ar/
 #   -> 401
 #

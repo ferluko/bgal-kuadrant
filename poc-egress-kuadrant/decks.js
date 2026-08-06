@@ -64,7 +64,7 @@ function tecnico() {
 
   // 2 — el problema
   s = p.addSlide();
-  encabezado(s, "El problema", "server consume server2 por su nombre de Service. Queremos mover server2 a EKS.");
+  encabezado(s, "El problema", "bff consume backend por su nombre de Service. Queremos mover backend a EKS.");
   filaIcono(s, 2.0, "1", "Sin tocar el código ni la URL del consumidor",
     "Mismo host, misma IP, mismo puerto, mismo protocolo. La app no se entera de la migración.", C.deep);
   filaIcono(s, 3.35, "2", "Con el salto entre clusters autenticado",
@@ -79,7 +79,7 @@ function tecnico() {
   s = p.addSlide();
   encabezado(s, "La idea: tres piezas, ninguna nueva", null);
   const piezas = [
-    ["Interceptar\npor selector", "Al Service server2 se le cambia el selector: sus endpoints pasan a ser los pods de un gateway de egreso.\n\nMisma ClusterIP, mismo nombre. No se recrea nada.", C.deep],
+    ["Interceptar\npor selector", "Al Service backend se le cambia el selector: sus endpoints pasan a ser los pods de un gateway de egreso.\n\nMisma ClusterIP, mismo nombre. No se recrea nada.", C.deep],
     ["Firmar\nen la salida", "El gateway emite un JWT de 300 s firmado con una clave que vive sólo en el origen, y lo inyecta en un header.\n\nAl destino sólo va la clave pública.", C.teal],
     ["Repartir\npor peso", "Con el Service ya interceptado, el reparto local/remoto se controla desde el HTTPRoute.\n\nEl Service no se vuelve a tocar.", C.mint],
   ];
@@ -107,15 +107,15 @@ function tecnico() {
   flecha(M + 1.55, 2.68, 0.5);
   caja(M + 2.1, 2.3, 1.7, 0.75, "Envoy\ningress", C.deep);
   flecha(M + 3.85, 2.68, 0.5);
-  caja(M + 4.4, 2.3, 1.5, 0.75, "server", C.deep);
+  caja(M + 4.4, 2.3, 1.5, 0.75, "bff", C.deep);
   flecha(M + 5.95, 2.68, 0.5);
-  caja(M + 6.5, 2.15, 2.1, 1.05, "Service server2\nselector cambiado", C.amber);
+  caja(M + 6.5, 2.15, 2.1, 1.05, "Service backend\nselector cambiado", C.amber);
   s.addShape("line", { x: M + 7.55, y: 3.25, w: 0, h: 0.55, line: { color: C.gray, width: 2, endArrowType: "triangle" } });
   caja(M + 6.2, 3.85, 2.7, 0.9, "Gateway de egreso\nfirma el JWT", C.teal);
 
   s.addShape("line", { x: M + 6.6, y: 4.8, w: -1.6, h: 0.75, line: { color: C.gray, width: 2, endArrowType: "triangle" } });
   s.addShape("line", { x: M + 8.55, y: 4.85, w: 0.8, h: 0.68, line: { color: C.gray, width: 2, endArrowType: "triangle" } });
-  caja(M + 3.9, 5.55, 2.2, 0.8, "server2 local", C.gray);
+  caja(M + 3.9, 5.55, 2.2, 0.8, "backend local", C.gray);
   caja(M + 9.4, 5.55, 2.5, 0.8, "destino: valida firma y claims", C.mint, C.dark);
   s.addText("peso", { x: M + 4.9, y: 5.0, w: 0.9, h: 0.3, fontSize: 11, color: C.gray, fontFace: B, italic: true, align: "center", margin: 0 });
   s.addText("peso, con TLS", { x: M + 6.9, y: 5.22, w: 1.6, h: 0.3, fontSize: 11, color: C.gray, fontFace: B, italic: true, align: "right", margin: 0 });
@@ -151,7 +151,7 @@ function tecnico() {
   stat(s, M + 8.4, 2.1, 3.5, "21 ms", "con Authorino\nfirmando cada request", C.deep);
   tarjeta(s, M, 4.5, 5.75, 2.3, C.white);
   s.addText("La ClusterIP nunca cambió", { x: M + 0.35, y: 4.75, w: 5.05, h: 0.4, fontSize: 18, color: C.dark, fontFace: H, bold: true, margin: 0 });
-  s.addText("172.30.169.54 antes y después del cutover. Los pods de server2 nunca se detuvieron: la migración no tiene ventana.",
+  s.addText("172.30.169.54 antes y después del cutover. Los pods de backend nunca se detuvieron: la migración no tiene ventana.",
     { x: M + 0.35, y: 5.2, w: 5.05, h: 1.3, fontSize: 14, color: C.gray, fontFace: B, margin: 0, lineSpacing: 19 });
   tarjeta(s, M + 6.15, 4.5, 5.75, 2.3, C.white);
   s.addText("La señal que no miente", { x: M + 6.5, y: 4.75, w: 5.05, h: 0.4, fontSize: 18, color: C.dark, fontFace: H, bold: true, margin: 0 });

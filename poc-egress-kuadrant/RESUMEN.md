@@ -10,10 +10,10 @@ la migración reversible en cualquier momento.
 
 ## 1. El problema
 
-`server` consume `http://server2.echoserver.svc.cluster.local:8080`. Queremos mover `server2` a
+`bff` consume `http://backend.poc-egress-kuadrant.svc.cluster.local:8080`. Queremos mover `backend` a
 otro cluster (EKS) con tres condiciones:
 
-1. **Sin tocar el código ni la URL de `server`.** Mismo host, misma IP, mismo puerto.
+1. **Sin tocar el código ni la URL de `bff`.** Mismo host, misma IP, mismo puerto.
 2. **Con el salto entre clusters autenticado**, sin depender de un IdP ni de conectividad
    permanente entre los dos lados.
 3. **Migración progresiva y reversible**, no big-bang con ventana.
@@ -22,7 +22,7 @@ otro cluster (EKS) con tres condiciones:
 
 Tres piezas, ninguna nueva:
 
-**Interceptar por selector.** El `Service server2` no se recrea: se le cambia el `selector` para
+**Interceptar por selector.** El `Service backend` no se recrea: se le cambia el `selector` para
 que sus endpoints pasen a ser los pods de un gateway de egreso. Misma ClusterIP, mismo nombre,
 mismo puerto. Para el cliente no cambió nada. El rollback es el mismo `patch` al revés, en
 aproximadamente un segundo y sin arranque en frío.
@@ -36,14 +36,14 @@ desde el `HTTPRoute`: espejo → canary por header → 1/5/25/50/100 %. El `Serv
 tocar.
 
 ```
-cliente ──► F5 ──► Envoy ingress ──► server ──► [Service server2]
+cliente ──► F5 ──► Envoy ingress ──► bff ──► [Service backend]
                                                       │  selector cambiado
                                                       ▼
                                             Gateway de egreso ── firma el JWT
                                                  │        │
                                           peso   │        │  peso
                                                  ▼        ▼
-                                          server2 local   TLS ──► destino
+                                          backend local   TLS ──► destino
                                                                     valida firma
                                                                     y claims
 ```
@@ -81,9 +81,9 @@ Números que importan:
 
 - **Costo de la intercepción:** 10,4 ms directo → ~12 ms con el Envoy en el medio → ~21 ms con
   Authorino firmando. Sobre tráfico interno, sin RTT real.
-- **La ClusterIP nunca cambió** (`172.30.169.54`) y los pods de `server2` nunca se detuvieron.
+- **La ClusterIP nunca cambió** (`172.30.169.54`) y los pods de `backend` nunca se detuvieron.
 - **La señal de que la intercepción tomó efecto** es que la IP de origen que ve el backend pasa
-  de la del pod `server` a la del pod del gateway. No hay que instrumentar nada para verla.
+  de la del pod `bff` a la del pod del gateway. No hay que instrumentar nada para verla.
 
 Para que esto fuera verificable hizo falta un workload que realmente encadene: un echo server
 suelto no hace llamadas salientes, así que el salto a migrar no existía. Ver
@@ -118,7 +118,7 @@ la Opción B del ADR es viable, pero no como está documentada hoy.
 
 **La `AuthPolicy` de egreso es un punto único de falla del camino de la app.** Una clave que
 Authorino no puede parsear deja su `AuthConfig` sin reconciliar, el `ext_authz` falla cerrado y
-`server` deja de responder — aunque el destino no tenga nada que ver. Por eso el cutover va en
+`bff` deja de responder — aunque el destino no tenga nada que ver. Por eso el cutover va en
 dos pasos: primero el selector, después la política.
 
 **`x-request-id` no sirve para correlacionar entre clusters** ([H10](HALLAZGOS.md#h10)): el

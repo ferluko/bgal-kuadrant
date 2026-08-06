@@ -7,7 +7,7 @@
 #
 # Sin dependencias: sólo la stdlib. No necesita pip, ni red al instalar, ni build.
 #
-# Configuración por env (ver 01-deployment-server.yaml):
+# Configuración por env (ver 01-bff.yaml):
 #   PORT                    puerto de escucha                       (default 8080)
 #   HOP_NAME                nombre del hop en la salida             (default hostname)
 #   UPSTREAM_URL            si está vacío, NO encadena: es un echo terminal
@@ -26,7 +26,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cascade-bff
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     poc.galicia.io/rol: cascada-bff
 data:

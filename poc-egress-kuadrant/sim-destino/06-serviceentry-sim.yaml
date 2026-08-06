@@ -29,8 +29,8 @@
 apiVersion: networking.istio.io/v1
 kind: ServiceEntry
 metadata:
-  name: server2-destino
-  namespace: echoserver
+  name: backend-destino
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/modo: "simulacion — endpoints fijados al destino local"
     poc.galicia.io/pasar-a-real: "borrar el bloque spec.endpoints"
@@ -73,13 +73,13 @@ spec:
 #
 # 1) El host quedó en el registry del proxy de egreso:
 #
-#   POD=$(oc -n echoserver get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
-#   oc -n echoserver exec $POD -- curl -s localhost:15000/clusters | grep app2.paas-demo | head -5
+#   POD=$(oc -n poc-egress-kuadrant get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
+#   oc -n poc-egress-kuadrant exec $POD -- curl -s localhost:15000/clusters | grep app2.paas-demo | head -5
 #
 # 2) El HTTPRoute con el backendRef remoto resuelve (es la PRIMERA vez que se ejercita
 #    `backendRef kind: Hostname` en este cluster):
 #
-#   oc -n echoserver get httproute egress-server2 \
+#   oc -n poc-egress-kuadrant get httproute egress-backend \
 #     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 #
 #   `ResolvedRefs=False` acá significa que el controller NO acepta `kind: Hostname` como

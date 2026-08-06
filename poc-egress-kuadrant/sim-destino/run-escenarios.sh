@@ -20,11 +20,11 @@
 set -uo pipefail   # sin -e: los fallos se reportan, no cortan la corrida
 
 URL="${URL:-http://10.254.28.68}"
-HOST="${HOST:-app1.paas-demo.bancogalicia.com.ar}"
-NS="${NS:-echoserver}"
+HOST="${HOST:-bff.paas-demo.bancogalicia.com.ar}"
+NS="${NS:-poc-egress-kuadrant}"
 NS_SIM="${NS_SIM:-echoserver-eks-sim}"
 FQDN="${FQDN:-app2.paas-demo.bancogalicia.com.ar}"
-HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
+HOST_INTERNO="${HOST_INTERNO:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # El destino no tiene por qué estar en este cluster: con estas cuatro variables la misma
@@ -73,11 +73,11 @@ ocd()       { oc ${CTX_DST:+--context="$CTX_DST"} "$@"; }
 existe_dst(){ ocd get "$1" "$2" ${3:+-n "$3"} >/dev/null 2>&1; }
 
 # Petición TLS directa al destino simulado, con SNI del FQDN real y un token arbitrario.
-# Va por `oc exec` al pod `server` (tiene python3) en vez de crear un pod por prueba:
+# Va por `oc exec` al pod `bff` (tiene python3) en vez de crear un pod por prueba:
 # es ~10x más rápido y no depende de que la imagen de debug traiga curl.
 directo_al_destino() {
   local ip="$1" tok="${2-}"
-  oc -n "$NS" exec -i deploy/server -- python3 - "$ip" "$FQDN" "$HOST_INTERNO" "$tok" <<'PY' 2>/dev/null || echo "ERROR"
+  oc -n "$NS" exec -i deploy/bff -- python3 - "$ip" "$FQDN" "$HOST_INTERNO" "$tok" <<'PY' 2>/dev/null || echo "ERROR"
 import http.client, socket, ssl, sys
 ip, fqdn, hosthdr, tok = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 ctx = ssl._create_unverified_context()
@@ -116,7 +116,7 @@ alterar_firma() {
 # al aplicar — `oc apply` sale bien y el campo no queda. Detectar la fase por el nombre de
 # la rule da siempre falso. El header match sí sobrevive.
 hay_canary() {
-  oc -n "$NS" get httproute egress-server2 \
+  oc -n "$NS" get httproute egress-backend \
     -o jsonpath='{.spec.rules[*].matches[*].headers[*].name}' 2>/dev/null | grep -qi 'x-canary'
 }
 
@@ -125,8 +125,8 @@ hay_canary() {
 esperar_status() {
   local g o
   for _ in $(seq 1 15); do
-    g=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.metadata.generation}' 2>/dev/null)
-    o=$(oc -n "$NS" get httproute egress-server2 \
+    g=$(oc -n "$NS" get httproute egress-backend -o jsonpath='{.metadata.generation}' 2>/dev/null)
+    o=$(oc -n "$NS" get httproute egress-backend \
           -o jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].observedGeneration}' 2>/dev/null)
     [[ -n "$g" && "$g" == "$o" ]] && return 0
     sleep 2
@@ -159,33 +159,33 @@ for b in oc jq curl; do command -v $b >/dev/null || { echo "falta '$b' en el PAT
 # ─────────────────────────────────────────────────────────────────────────────────────
 esc "E0 — Entorno" "que el punto de partida sea el que la PoC asume, antes de medir nada"
 
-CONT=$(oc -n "$NS" get pod -l app=server -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null)
-eq "server corre un solo contenedor" "$CONT" "bff"
+CONT=$(oc -n "$NS" get pod -l app=bff -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null)
+eq "bff corre un solo contenedor" "$CONT" "bff"
 
-SEL=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.selector.gateway\.networking\.k8s\.io/gateway-name}' 2>/dev/null)
-eq "cutover activo (svc server2 -> gateway)" "${SEL:-app=server2}" "egress-gw"
+SEL=$(oc -n "$NS" get svc backend -o jsonpath='{.spec.selector.gateway\.networking\.k8s\.io/gateway-name}' 2>/dev/null)
+eq "cutover activo (svc backend -> gateway)" "${SEL:-app=backend}" "egress-gw"
 
-CIP=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
-nota "ClusterIP de server2: $CIP  (tiene que ser la misma de siempre: nunca se recreó el Service)"
+CIP=$(oc -n "$NS" get svc backend -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+nota "ClusterIP de backend: $CIP  (tiene que ser la misma de siempre: nunca se recreó el Service)"
 
-BREF=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.spec.rules[*].backendRefs[*].name}' 2>/dev/null)
-tiene "ASSERT ANTI-LOOP: backendRef local" "$BREF" "server2-local"
-[[ "$BREF" == *"server2 "* || "$BREF" == "server2" ]] && bad "backendRef NO apunta a 'server2'" "$BREF" "sin 'server2' pelado"
+BREF=$(oc -n "$NS" get httproute egress-backend -o jsonpath='{.spec.rules[*].backendRefs[*].name}' 2>/dev/null)
+tiene "ASSERT ANTI-LOOP: backendRef local" "$BREF" "backend-local"
+[[ "$BREF" == *"backend "* || "$BREF" == "backend" ]] && bad "backendRef NO apunta a 'backend'" "$BREF" "sin 'backend' pelado"
 
-ENVAMB=$(oc -n "$NS" get deploy server2 -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="ENABLE__ENVIRONMENT")]}{.value}{end}' 2>/dev/null)
-eq "server2 expone HOSTNAME (conteo no ciego)" "$ENVAMB" "true"
+ENVAMB=$(oc -n "$NS" get deploy backend -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="ENABLE__ENVIRONMENT")]}{.value}{end}' 2>/dev/null)
+eq "backend expone HOSTNAME (conteo no ciego)" "$ENVAMB" "true"
 
 GWIP=$(oc -n "$NS" get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
-POD2=$(oc -n "$NS" get pod -l app=server2 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-nota "pod del gateway de egreso: $GWIP   |   server2 local: $POD2"
+POD2=$(oc -n "$NS" get pod -l app=backend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+nota "pod del gateway de egreso: $GWIP   |   backend local: $POD2"
 
 # ─────────────────────────────────────────────────────────────────────────────────────
 esc "E1 — Camino local por el gateway de egreso" \
-    "que el tráfico atraviesa el Envoy de egreso y vuelve al server2 local, con wristband emitido"
+    "que el tráfico atraviesa el Envoy de egreso y vuelve al backend local, con wristband emitido"
 
 J=$(req)
 eq  "status del backend"                     "$(f "$J" '.upstream.status')" "200"
-eq  "atendió el server2 local"               "$(f "$J" '.upstream.body.environment.HOSTNAME')" "$POD2"
+eq  "atendió el backend local"               "$(f "$J" '.upstream.body.environment.HOSTNAME')" "$POD2"
 tiene "el origen que ve el backend es el gw" "$(f "$J" '.upstream.body.host.ip')" "$GWIP"
 eq  "el Host NO se reescribe"                "$(f "$J" '.upstream.body.request.headers.host')" "$HOST_INTERNO"
 ne  "pasó por un Envoy de egreso"            "$(f "$J" '.upstream.body.request.headers["x-envoy-peer-metadata-id"]')" "null"
@@ -201,7 +201,7 @@ if [[ "$TOKEN" != "null" ]]; then
   eq "  claim aud"            "$(f "$CLM" '.aud')" "$FQDN"
   eq "  claim src_cluster"    "$(f "$CLM" '.src_cluster')" "paas-arqlab"
   eq "  claim src_namespace"  "$(f "$CLM" '.src_namespace')" "$NS"
-  eq "  claim dst_service"    "$(f "$CLM" '.dst_service')" "server2"
+  eq "  claim dst_service"    "$(f "$CLM" '.dst_service')" "backend"
   eq "  vida del token (exp-iat)" "$(( $(f "$CLM" '.exp') - $(f "$CLM" '.iat') ))" "300"
   KID=$(f "$HDR" '.kid'); nota "kid del token: $KID"
   nota "OJO: 'sub' lo agrega Authorino desde la identidad anonymous — NO identifica al workload (README §8.1)"
@@ -220,7 +220,7 @@ else
   PROG=$(ocd -n "$NS_SIM" get gateway "$GW_DST" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
   eq "Gateway del destino Programmed" "${PROG:-null}" "True"
 
-  AP=$(ocd -n "$NS_SIM" get authpolicy server2-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
+  AP=$(ocd -n "$NS_SIM" get authpolicy backend-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
   eq "AuthPolicy del destino Accepted/Enforced" "${AP:-null}" "True/True"
 
   # Con el destino en otro cluster la ClusterIP no sirve de nada desde acá: se entra por la
@@ -249,7 +249,7 @@ else
   hay_canary || aplicar_fase "$DIR/../origen/08-rollout/fase1-canary-header.yaml"
 
   esperar_status || nota "el status del HTTPRoute no convergió en 30s; lo que sigue puede ser lectura vieja"
-  RR=$(oc -n "$NS" get httproute egress-server2 -o jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}' 2>/dev/null)
+  RR=$(oc -n "$NS" get httproute egress-backend -o jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}' 2>/dev/null)
   eq "backendRef kind:Hostname resuelve" "${RR:-null}" "True"
   nota "(primera vez que se ejercita kind:Hostname en este cluster; False => fallback de origen/03)"
 
@@ -280,7 +280,7 @@ esc "E4 — Reparto por peso" "que 'weight' funciona sobre un backendRef kind:Ho
   if (( ! SIM )); then skip "escenario E4" "requiere el destino simulado"
   else
     if aplicar_fase "$DIR/../origen/08-rollout/fase2-pesos.yaml"; then
-      oc -n "$NS" patch httproute egress-server2 --type json -p \
+      oc -n "$NS" patch httproute egress-backend --type json -p \
         '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":75},
           {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":25}]' >/dev/null 2>&1
       sleep 4

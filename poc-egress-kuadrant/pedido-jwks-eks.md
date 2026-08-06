@@ -16,11 +16,11 @@ kubectl -n echoserver create configmap jwks-egress-origen \
   --from-file=jwks.json=./jwks.json --dry-run=client -o yaml | kubectl apply -f -
 
 # Authorino cachea el JWKS; recrear la AuthPolicy fuerza el refetch
-kubectl -n echoserver delete authpolicy server2-ingress-jwt
+kubectl -n echoserver delete authpolicy backend-ingress-jwt
 kubectl -n echoserver apply -f <el manifiesto de la AuthPolicy>
 
 # y confirmar que quedó lista antes de mandar tráfico
-kubectl -n echoserver get authpolicy server2-ingress-jwt \
+kubectl -n echoserver get authpolicy backend-ingress-jwt \
   -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status} {.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
 ```
 
@@ -45,16 +45,16 @@ Desde el cluster origen, un request con un wristband recién emitido tiene que d
 de 401:
 
 ```bash
-TOK=$(curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
+TOK=$(curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
       | jq -r '.upstream.body.request.headers["x-egress-token"]')
 
-oc -n echoserver exec -i deploy/server -- python3 -c "
+oc -n poc-egress-kuadrant exec -i deploy/bff -- python3 -c "
 import socket, ssl, http.client
 ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
 s=ctx.wrap_socket(socket.create_connection(('172.19.105.169',443),timeout=10),
                   server_hostname='app2.paas-demo.bancogalicia.com.ar')
 c=http.client.HTTPSConnection('x',443,context=ctx,timeout=10); c.sock=s
-c.request('GET','/',headers={'Host':'server2.echoserver.svc.cluster.local:8080',
+c.request('GET','/',headers={'Host':'backend.poc-egress-kuadrant.svc.cluster.local:8080',
                              'x-egress-token':'$TOK'})
 print(c.getresponse().status)"
 ```
@@ -72,7 +72,7 @@ kubectl -n kuadrant-system logs deploy/authorino --since=10m | grep -i 'cannot v
 | Conectividad al NLB desde un pod de `paas-arqlab` | ✅ conecta en 182 ms |
 | Resolución de `app2.paas-demo.bancogalicia.com.ar` | ✅ desde el bastión y desde CoreDNS |
 | Certificado del destino | ✅ los SAN cubren `app2.paas-demo.bancogalicia.com.ar` |
-| Ruteo del destino por Host interno | ✅ sólo `server2.echoserver.svc.cluster.local:8080` da 401; el resto da 404 |
+| Ruteo del destino por Host interno | ✅ sólo `backend.poc-egress-kuadrant.svc.cluster.local:8080` da 401; el resto da 404 |
 | Emisión del wristband en el origen | ✅ RS256, 5 claims, vida de 300 s |
 
 O sea que **lo único que falta para cerrar el camino de punta a punta es esta clave.**

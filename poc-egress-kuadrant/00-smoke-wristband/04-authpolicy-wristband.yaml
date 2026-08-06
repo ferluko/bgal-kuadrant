@@ -11,7 +11,7 @@ apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
   name: smoke-wristband
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
@@ -34,11 +34,11 @@ spec:
                 "src_cluster":
                   value: paas-arqlab
                 "src_namespace":
-                  value: echoserver
+                  value: poc-egress-kuadrant
                 "src_service":
-                  value: server
+                  value: bff
                 "dst_service":
-                  value: server2
+                  value: backend
               signingKeyRefs:
                 - name: egress-echoserver-1
                   algorithm: RS256

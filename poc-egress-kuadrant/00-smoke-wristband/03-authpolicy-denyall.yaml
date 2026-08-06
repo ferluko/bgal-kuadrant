@@ -8,7 +8,7 @@ apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
   name: smoke-denyall
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
@@ -22,7 +22,7 @@ spec:
 ---
 # Esperado: 403.
 #
-#   oc -n echoserver get authpolicy smoke-denyall \
+#   oc -n poc-egress-kuadrant get authpolicy smoke-denyall \
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
 # Ojo con la diferencia: `Accepted` significa que el operador entendió la política.
@@ -30,4 +30,4 @@ spec:
 # hallazgo de plataforma, no un error de esta PoC.
 #
 # Borrar esta policy antes de aplicar la del paso 3:
-#   oc -n echoserver delete authpolicy smoke-denyall
+#   oc -n poc-egress-kuadrant delete authpolicy smoke-denyall

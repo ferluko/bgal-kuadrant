@@ -1,4 +1,4 @@
-# Destino simulado — migrar `server2` a "EKS" sin EKS
+# Destino simulado — migrar `backend` a "EKS" sin EKS
 
 Stand-in local del cluster destino: permite ejercitar la migración completa sin depender del
 cluster EKS ni de quien lo administra.
@@ -97,7 +97,7 @@ openssl x509 -in out/server.crt -noout -text | grep -A1 'Subject Alternative Nam
 ```
 
 ```bash
-oc apply -f 01-namespace-server2.yaml -f 02-gateway-sim.yaml -f 03-httproute-server2.yaml
+oc apply -f 01-namespace-backend.yaml -f 02-gateway-sim.yaml -f 03-httproute-backend.yaml
 ```
 
 El JWKS se crea del archivo, no pegando `x` e `y` a mano — así no hay forma de que se
@@ -115,7 +115,7 @@ oc apply -f 04-jwks-static.yaml -f 05-authpolicy-jwt.yaml
 deniega todo.
 
 ```bash
-oc -n echoserver-eks-sim get authpolicy server2-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{" "}{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+oc -n echoserver-eks-sim get authpolicy backend-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{" "}{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
 ```
 
 Gate del destino simulado — tiene que dar **401**, y eso ya es la prueba negativa (a):
@@ -129,7 +129,7 @@ Un **200** acá sería peor que un 404: significaría que el destino contesta si
 Recién entonces, del lado origen:
 
 ```bash
-oc apply -n echoserver -f 06-serviceentry-sim.yaml -f ../origen/04-destinationrule-tls.yaml
+oc apply -n poc-egress-kuadrant -f 06-serviceentry-sim.yaml -f ../origen/04-destinationrule-tls.yaml
 ```
 
 ## 5. La migración, ya con el ladder del README §6bis
@@ -144,21 +144,21 @@ Desde acá todo es el procedimiento real, sin variantes. Cada fase con su gate:
 | 3 — por método | `../origen/08-rollout/fase3-por-metodo.yaml` | GET al destino, escrituras en local |
 | 4 — 100% | `../origen/03-httproute-egress.yaml` | estado final |
 
-El conteo del reparto no depende de comparar hashes de pod: el `server2` simulado lleva
+El conteo del reparto no depende de comparar hashes de pod: el `backend` simulado lleva
 `SIM_SITE=eks-sim`, así que se lee directo.
 
 ```bash
-for i in $(seq 1 100); do curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ | jq -r '.upstream.body.environment.SIM_SITE // "local"'; done | sort | uniq -c
+for i in $(seq 1 100); do curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ | jq -r '.upstream.body.environment.SIM_SITE // "local"'; done | sort | uniq -c
 ```
 
 Y el detalle completo de un request, incluidos los headers que agrega la AuthPolicy del
 destino al validar:
 
 ```bash
-curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ | jq '{st:.upstream.status, ms:.upstream.latencyMs, site:(.upstream.body.environment.SIM_SITE // "local"), src_cluster:.upstream.body.request.headers["x-forwarded-src-cluster"], host_visto:.upstream.body.request.headers.host}'
+curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ | jq '{st:.upstream.status, ms:.upstream.latencyMs, site:(.upstream.body.environment.SIM_SITE // "local"), src_cluster:.upstream.body.request.headers["x-forwarded-src-cluster"], host_visto:.upstream.body.request.headers.host}'
 ```
 
-`host_visto` tiene que seguir siendo `server2.echoserver.svc.cluster.local:8080` aunque el
+`host_visto` tiene que seguir siendo `backend.poc-egress-kuadrant.svc.cluster.local:8080` aunque el
 SNI haya sido `app2...`: es la confirmación de que el Host no se reescribe.
 
 **El espejo (fase 0) duplica escrituras y es del 100% del tráfico** — Istio no soporta
@@ -167,7 +167,7 @@ SNI haya sido `app2...`: es la confirmación de que el Host no se reescribe.
 ## 6. Pruebas negativas, ahora sí ejecutables
 
 ```bash
-TOKEN=$(curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ | jq -r '.upstream.body.request.headers["x-egress-token"]'); IP=$(oc -n echoserver-eks-sim get svc ingress-sim-openshift-default -o jsonpath='{.spec.clusterIP}'); U="https://app2.paas-demo.bancogalicia.com.ar/"; R="app2.paas-demo.bancogalicia.com.ar:443:$IP"; echo -n "(a) sin token      -> "; oc -n echoserver-eks-sim run n$RANDOM --rm -i --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal -- curl -sS -o /dev/null -w '%{http_code}\n' -k --resolve $R $U; echo -n "(b) firma alterada -> "; oc -n echoserver-eks-sim run n$RANDOM --rm -i --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal -- curl -sS -o /dev/null -w '%{http_code}\n' -k --resolve $R -H "x-egress-token: ${TOKEN%?}X" $U; echo -n "(valido)           -> "; oc -n echoserver-eks-sim run n$RANDOM --rm -i --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal -- curl -sS -o /dev/null -w '%{http_code}\n' -k --resolve $R -H "x-egress-token: $TOKEN" $U
+TOKEN=$(curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ | jq -r '.upstream.body.request.headers["x-egress-token"]'); IP=$(oc -n echoserver-eks-sim get svc ingress-sim-openshift-default -o jsonpath='{.spec.clusterIP}'); U="https://app2.paas-demo.bancogalicia.com.ar/"; R="app2.paas-demo.bancogalicia.com.ar:443:$IP"; echo -n "(a) sin token      -> "; oc -n echoserver-eks-sim run n$RANDOM --rm -i --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal -- curl -sS -o /dev/null -w '%{http_code}\n' -k --resolve $R $U; echo -n "(b) firma alterada -> "; oc -n echoserver-eks-sim run n$RANDOM --rm -i --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal -- curl -sS -o /dev/null -w '%{http_code}\n' -k --resolve $R -H "x-egress-token: ${TOKEN%?}X" $U; echo -n "(valido)           -> "; oc -n echoserver-eks-sim run n$RANDOM --rm -i --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal -- curl -sS -o /dev/null -w '%{http_code}\n' -k --resolve $R -H "x-egress-token: $TOKEN" $U
 ```
 
 Esperado: (a) **401**, (b) **401**, válido **200**.
@@ -182,7 +182,7 @@ Esperado: (a) **401**, (b) **401**, válido **200**.
 ## 7. Desmontar
 
 ```bash
-oc delete ns echoserver-eks-sim; oc -n echoserver delete serviceentry server2-destino; oc -n echoserver delete destinationrule server2-destino-tls; oc -n echoserver delete secret destino-ca; oc apply -n echoserver -f ../origen/08-rollout/fase0a-solo-local.yaml
+oc delete ns echoserver-eks-sim; oc -n poc-egress-kuadrant delete serviceentry backend-destino; oc -n poc-egress-kuadrant delete destinationrule backend-destino-tls; oc -n poc-egress-kuadrant delete secret destino-ca; oc apply -n poc-egress-kuadrant -f ../origen/08-rollout/fase0a-solo-local.yaml
 ```
 
 La última línea es la que importa: devuelve el HTTPRoute al estado base sin destino. Sin

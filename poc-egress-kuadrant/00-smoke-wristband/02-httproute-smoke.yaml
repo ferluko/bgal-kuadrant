@@ -1,4 +1,4 @@
-# SMOKE TEST — ruta al server2 local, que refleja los headers recibidos.
+# SMOKE TEST — ruta al backend local, que refleja los headers recibidos.
 #
 # El echo server es la instrumentación: lo que aparezca en su respuesta es
 # literalmente lo que el gateway le mandó al upstream. Es la única forma de
@@ -7,7 +7,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: smoke-wristband
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   parentRefs:
     - name: smoke-gw
@@ -21,8 +21,8 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: server2
+        - name: backend
           port: 8080
 ---
-# Nota: apunta al Service `server2` con su selector ORIGINAL (app: server2).
+# Nota: apunta al Service `backend` con su selector ORIGINAL (app: backend).
 # Este smoke test se corre ANTES del cutover, así que no hay riesgo de loop.

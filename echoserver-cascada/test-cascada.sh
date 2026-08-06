@@ -2,8 +2,8 @@
 # Prueba de la cascada desde el bastión. Requiere curl y jq.
 #
 #   ./test-cascada.sh                                        # via HTTPRoute publicado
-#   URL=http://10.254.28.68 HOST=app1.paas-demo.bancogalicia.com.ar ./test-cascada.sh
-#   URL=http://localhost:8080 ./test-cascada.sh              # con `oc port-forward svc/server 8080:8080`
+#   URL=http://10.254.28.68 HOST=bff.paas-demo.bancogalicia.com.ar ./test-cascada.sh
+#   URL=http://localhost:8080 ./test-cascada.sh              # con `oc port-forward svc/bff 8080:8080`
 #
 # Por el APIM (3scale/APIcast) — la URL incluye el path del producto y las credenciales van
 # en HDRS, separadas por `;`:
@@ -11,7 +11,7 @@
 #   HDRS='app_id: 65ce03a7;app_key: b7e44705ce8474b15c90a1b71c9d61d3' ./test-cascada.sh
 set -euo pipefail
 
-URL="${URL:-http://app1.paas-demo.bancogalicia.com.ar}"
+URL="${URL:-http://bff.paas-demo.bancogalicia.com.ar}"
 HOST="${HOST:-}"
 CURL=(curl -sS --max-time 15)
 [[ -n "$HOST" ]] && CURL+=(-H "Host: $HOST")
