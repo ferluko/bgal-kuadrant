@@ -218,8 +218,8 @@ function tecnico() {
   const falta = [
     ["Identidad real del llamador", "Hoy el gateway autentica como anónimo y el control es la NetworkPolicy. Lo correcto es mTLS de la malla, con el principal en el token y el destino autorizando por él."],
     ["Multi-tenancy de la clave de firma", "Kuadrant obliga a que viva en un namespace de plataforma, no del equipo de la app. Limitación abierta: sin resolverla, el patrón no es multi-tenant."],
-    ["Red hacia el destino", "Bloqueante para cualquier prueba real. Habilitar el puerto 443 desde la subred de workers, o fijar una IP de egreso."],
-    ["Rotación de clave y observabilidad", "Un identificador de audiencia por destino, rotación sin ventana, y métricas por backend — que además son el criterio para avanzar de fase."],
+    ["Subdominio privado y tráfico east-west", "Hoy el salto usa la zona de publicación de aplicaciones, con nombres de laboratorio. Hace falta una zona interna dedicada al tráfico entre clusters: convención de nombres, emisión de certificados y resolución desde CoreDNS."],
+    ["Rotación, audiencia desacoplada y observabilidad", "Hoy la audiencia del token ES el FQDN, así que renombrar el dominio rompe el contrato. Va junto con el punto 3. Más rotación sin ventana y métricas por backend."],
   ];
   falta.forEach((f, i) => {
     const y = 1.95 + i * 1.22;
@@ -326,7 +326,7 @@ function gerencial() {
     ["Continuar", "El diseño se sostiene: la mecánica está probada y los problemas encontrados tienen solución conocida.", C.mint],
     ["Cerrar la prueba con el cluster real", "Pedir la sincronización de la clave en el destino. Es lo único que falta para medir latencia real y programar la migración.", C.deep],
     ["Enmendar la decisión de arquitectura", "El hallazgo sobre el algoritmo de firma afecta a la opción ya aprobada. Corregirlo ahora evita descubrirlo con los dos clusters montados.", C.amber],
-    ["No ofrecerlo como servicio todavía", "Falta resolver la identidad del consumidor y el aislamiento de la clave entre equipos. Para un primer caso puntual, sirve como está.", C.red],
+    ["No ofrecerlo como servicio todavía", "Falta resolver la identidad del consumidor, el aislamiento de la clave entre equipos y el esquema de nombres para el tráfico entre clusters. Para un primer caso puntual, sirve como está.", C.red],
   ];
   rec.forEach((r, i) => {
     const y = 1.9 + i * 1.25;

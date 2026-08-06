@@ -1,0 +1,95 @@
+# Cluster ORIGEN (paas-arqlab) — ServiceEntry apuntado al destino OCP, SIN depender del DNS.
+#
+# APLICAR EN EL NS `echoserver` DEL ORIGEN, no en el del destino.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────
+# PARA QUÉ EXISTE ESTE ARCHIVO
+#
+# Es el mismo truco de `sim-destino/06`, con una diferencia que cambia todo: el endpoint
+# fijado ya no es una ClusterIP local sino la **ingress VIP del cluster destino**. O sea
+# que el tráfico sale de verdad del cluster, cruza a Casa Matriz, entra por el router
+# HAProxy y lo valida un Kuadrant remoto — todo el camino real salvo la resolución del
+# nombre.
+#
+# Y la resolución del nombre es lo único que no se puede probar de este lado, porque
+# `app2.paas-demo.bancogalicia.com.ar` hoy sigue apuntando al NLB de EKS.
+#
+# Esto importa porque el SNI —que es lo que usa el router para elegir la Route de
+# passthrough (22)— lo fija `origen/04-destinationrule-tls.yaml`, NO el DNS. Con el
+# endpoint fijado a mano el SNI sigue siendo `app2...` y el router rutea igual. Por eso
+# esta fase valida el 100% del camino excepto una línea de zona.
+#
+# PASAR A DEFINITIVO = BORRAR ESTE ARCHIVO.
+#   Una vez movido el CNAME de `app2` al router del destino, se aplica
+#   `origen/02-serviceentry-destino.yaml` verbatim (`resolution: DNS`, sin `endpoints`) y
+#   este archivo no se usa más. No hay ningún otro cambio del lado origen.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: server2-destino
+  namespace: echoserver
+  annotations:
+    poc.galicia.io/modo: "destino OCP real, endpoint fijado a la ingress VIP — sin DNS"
+    poc.galicia.io/pasar-a-definitivo: "mover el CNAME y aplicar origen/02 verbatim"
+spec:
+  hosts:
+    # El FQDN REAL, sin cambiar. Es lo que hace que `origen/03`, `origen/04` y las cuatro
+    # fases de `origen/08-rollout/` se apliquen sin tocar un solo campo.
+    - app2.paas-demo.bancogalicia.com.ar
+  location: MESH_EXTERNAL
+  # STATIC, no DNS. Con `resolution: DNS` el bloque `endpoints` NO pisa la resolución:
+  # Envoy resuelve el FQDN por su cuenta —hoy, al NLB de EKS— y el request cuelga hasta el
+  # timeout del cliente. Se midió el 2026-08-04: 5008 ms exactos contra un
+  # UPSTREAM_TIMEOUT_MS=5000, con un síntoma que se lee como "el backend no responde" y no
+  # como un problema de resolución. `STATIC` usa el endpoint tal cual, que es la única
+  # forma segura de secuestrar un FQDN que ya resuelve a otra cosa.
+  resolution: STATIC
+  ports:
+    - number: 443
+      name: http-for-tls-origination
+      # `HTTP` a propósito, igual que en origen/02: es el patrón oficial de TLS
+      # origination. Envoy rutea L7 —necesario para inyectar el x-egress-token— y el
+      # DestinationRule hace el upgrade a TLS. Con `HTTPS` sería TCP opaco, sin inyección.
+      protocol: HTTP
+  endpoints:
+    # Ingress VIP de paas-dev1-lowmz (inventario/clusters.yaml: `ingress_vip: 10.254.34.2`),
+    # que es donde escucha el router HAProxy. Si el router está publicado además por un F5,
+    # se puede usar el VIP del F5: el camino que interesa validar es el mismo y el SNI no
+    # cambia.
+    #
+    # Tiene que ser una IP, no un FQDN: con `resolution: STATIC` Envoy no resuelve nada, y
+    # ese es justamente el punto.
+    - address: "10.254.34.2"
+      ports:
+        http-for-tls-origination: 443
+---
+# Verificación:
+#
+# 1) El host quedó en el registry del proxy de egreso con el endpoint correcto. Es LA
+#    comprobación: si acá aparece 172.19.105.122, sigue resolviendo por DNS al NLB de EKS.
+#
+#   POD=$(oc -n echoserver get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
+#   oc -n echoserver exec $POD -c istio-proxy -- pilot-agent request GET clusters \
+#     | grep -F app2.paas-demo | head -5
+#
+# 2) El HTTPRoute con el backendRef remoto resuelve:
+#
+#   oc -n echoserver get httproute egress-server2 \
+#     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+#
+#   `ResolvedRefs=False` significa que el controller no acepta `backendRef kind: Hostname`.
+#   El fallback está documentado en origen/03.
+#
+# 3) Hace falta también el DestinationRule, que se aplica verbatim y es el que pone el SNI:
+#
+#   oc apply -n echoserver -f ../origen/04-destinationrule-tls.yaml
+#
+#    con el Secret `destino-ca` en el ns donde corren los pods del gateway de egreso,
+#    cargado con la CA que firmó el wildcard del destino:
+#
+#   oc -n echoserver create secret generic destino-ca \
+#     --from-file=ca.crt=ca-interna-galicia.pem --from-file=cacert=ca-interna-galicia.pem \
+#     --dry-run=client -o yaml | oc apply -f -
+#
+#    Las dos claves (`ca.crt` y `cacert`) a propósito: distintas versiones de Istio buscan
+#    una u otra para `credentialName` en un DestinationRule con `mode: SIMPLE`.

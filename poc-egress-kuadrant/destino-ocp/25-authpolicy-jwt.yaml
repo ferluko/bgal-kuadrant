@@ -1,0 +1,96 @@
+# Cluster DESTINO OCP — validación del wristband.
+#
+# Los claims esperados son LOS MISMOS que en `sim-destino/05` y en `destino/13b`, sin
+# tocar un solo valor: los emite `origen/05-authpolicy-wristband.yaml` y no dependen de
+# dónde esté el destino. Eso es lo que hace que mover el destino de EKS a un OCP sea un
+# cambio de infraestructura y no de contrato de seguridad.
+#
+# Sin `x-egress-token` válido -> 401. Con token válido pero claims que no corresponden ->
+# 403. Que sean códigos distintos es el punto: distingue "no te reconozco" de "te
+# reconozco y no te habilito".
+#
+# ─────────────────────────────────────────────────────────────────────────────────────
+# LO QUE ESTE DESTINO EJERCITA Y LA SIMULACIÓN NO: EL SKEW DE RELOJ
+#
+# `tokenDuration: 300` significa que el destino rechaza un token cuyo `exp` ya pasó según
+# SU reloj. En `sim-destino` el token nace y muere bajo el mismo reloj, así que ese modo de
+# falla queda intacto. Acá son dos clusters en sitios distintos (PGA y Casa Matriz) y es la
+# primera vez que se prueba de verdad.
+#
+# Si los relojes difieren más de ~300 s, el destino rechaza el 100% de los tokens con un
+# 401 idéntico al de una firma inválida. Verificar en AMBOS clusters antes de culpar al
+# JWKS:
+#
+#   for c in <origen> <destino>; do
+#     echo -n "$c: "; oc --context=$c get nodes -o name | head -1 | xargs -I{} \
+#       oc --context=$c debug {} -- chroot /host chronyc tracking 2>/dev/null | grep -E 'System time|Leap'
+#   done
+#
+# Comparación rápida sin debug de nodo, que alcanza para descartar el problema:
+#
+#   date -u; oc --context=<destino> -n echoserver exec deploy/server2 -- date -u
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: server2-ingress-jwt
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: server2
+  rules:
+    authentication:
+      "egress-wristband":
+        jwt:
+          jwksUrl: http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+            prefix: ""
+    authorization:
+      "claims-esperados":
+        patternMatching:
+          patterns:
+            - predicate: |
+                auth.identity.iss == "https://egress.paas-arqlab.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.aud == "app2.paas-demo.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.src_cluster == "paas-arqlab"
+            - predicate: |
+                auth.identity.src_namespace == "echoserver"
+            - predicate: |
+                auth.identity.dst_service == "server2"
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de server2"
+      success:
+        headers:
+          "x-forwarded-src-cluster":
+            plain:
+              expression: auth.identity.src_cluster
+          "x-forwarded-src-namespace":
+            plain:
+              expression: auth.identity.src_namespace
+---
+# Verificación:
+#   oc -n echoserver get authpolicy server2-ingress-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{" "}{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+#   -> True True   (NO mandar tráfico antes: attacheada y sin sincronizar deniega todo)
+#
+# Notas de compatibilidad (idénticas a destino/13b):
+#  - `predicate` (CEL) requiere Authorino >= 0.19 / RHCL 1.x. En versiones previas:
+#       patterns:
+#         - {selector: auth.identity.aud, operator: eq, value: app2.paas-demo.bancogalicia.com.ar}
+#  - Si `aud` llegara como lista en vez de string:
+#       "app2.paas-demo.bancogalicia.com.ar" in auth.identity.aud
+#
+# Los `x-forwarded-src-*` que agrega el bloque `success` son la señal de que el request
+# pasó por la validación del destino y no por otro camino: aparecen en la salida del BFF
+# bajo `.upstream.body.request.headers`, junto al `x-egress-token`.

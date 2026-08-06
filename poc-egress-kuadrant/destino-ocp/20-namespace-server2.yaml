@@ -1,0 +1,98 @@
+# Cluster DESTINO OCP (paas-dev1-lowmz) — el `server2` remoto.
+#
+# Idéntico al server2 del origen salvo por el marcador `SIM_SITE`, que es lo que permite
+# leer el reparto sin comparar hashes de pod. En la salida del BFF aparece como:
+#
+#   jq -r '.upstream.body.environment.SIM_SITE // "local"'
+#
+# `ENABLE__ENVIRONMENT=true` es obligatorio para eso, igual que en el server2 local: en
+# echo-server `.host.hostname` es el header Host y `.host.ip` la IP del cliente, así que
+# ninguno identifica al pod (README §7.3).
+#
+# El namespace es `echoserver`, el mismo que usaría el destino EKS (destino/10). No hace
+# falta que coincida con el del origen —el destino se elige por FQDN, no por namespace—
+# pero mantenerlo igual evita tener dos convenciones para la misma cosa.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: echoserver
+  labels:
+    poc.galicia.io/rol: destino-ocp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server2
+  namespace: echoserver
+  labels:
+    app: server2
+    poc.galicia.io/rol: destino-ocp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: server2
+  template:
+    metadata:
+      labels:
+        app: server2
+        poc.galicia.io/rol: destino-ocp
+    spec:
+      containers:
+        - name: echo-server
+          # docker.io/ealen/echo-server — vía la cache pull-through de Quay (ADR-0002).
+          # Si este cluster todavía no tiene la cache configurada, el pull sale a Docker
+          # Hub y puede pegar contra el rate limit: es el primer motivo de ImagePullBackOff
+          # al montar esto en un cluster nuevo.
+          image: docker.io/ealen/echo-server:0.9.2
+          env:
+            # El default de la imagen es 80 y con restricted-v2 (UID arbitrario) no puede
+            # bindear un puerto privilegiado. 8080 es obligatorio, no cosmético.
+            - name: PORT
+              value: "8080"
+            - name: LOGS__IGNORE__PING
+              value: "true"
+            - name: ENABLE__ENVIRONMENT
+              value: "true"
+            - name: ENABLE__FILE
+              value: "false"
+            # Marcador del conteo del reparto. El valor tiene que coincidir con el que
+            # esperan los scripts (`SITE` en run-escenarios.sh y verificar.sh).
+            - name: SIM_SITE
+              value: dev1-lowmz
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2
+  namespace: echoserver
+  labels:
+    app: server2
+spec:
+  type: ClusterIP
+  selector:
+    app: server2
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+      appProtocol: http

@@ -1,0 +1,90 @@
+# Cluster DESTINO OCP (paas-dev1-lowmz) — Gateway de ingreso.
+#
+# Es `destino/10-gateway-ingress.yaml` con las tres diferencias que impone que el destino
+# sea OpenShift IPI vSphere y no EKS:
+#
+#   1. `gatewayClassName: openshift-default` — la clase de Istio gestionado por el
+#      cluster-ingress-operator. En EKS sería `istio` (Istio upstream).
+#   2. Service **ClusterIP**, no LoadBalancer. En vSphere IPI no hay proveedor de LB: un
+#      Service LoadBalancer queda `EXTERNAL-IP <pending>` para siempre y de paso se
+#      asignan nodePorts. Es el mismo motivo por el que `origen/01` va ClusterIP.
+#   3. La publicación al exterior la hace el **router HAProxy** con una Route de
+#      passthrough (22), no un NLB. Ver ahí por qué tiene que ser passthrough.
+#
+# Con esto NO hace falta MetalLB, que en `paas-dev1-lowmz` todavía tiene el pool sin
+# definir (`gitops/values/clusters/paas-dev1-lowmz.yaml`: `metallb.pool.addresses: TBD`).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ingress-gw
+  namespace: echoserver
+  labels:
+    # Habilita a Kuadrant/RHCL a gestionar políticas sobre este Gateway. Sin esta label
+    # la AuthPolicy de 25 queda sin attachear y el destino contesta sin exigir token.
+    kuadrant.io/gateway: "true"
+  annotations:
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: paas-demo-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# EL CERTIFICADO
+#
+# El wildcard `*.paas-demo.bancogalicia.com.ar` cubre `app2` (un solo nivel de
+# subdominio), así que es el mismo cert que se cargaría en EKS y el mismo que ya usa el
+# ingress de la PoC en el origen.
+#
+#   oc -n echoserver create secret tls paas-demo-wildcard-tls \
+#     --cert=wildcard.paas-demo.bancogalicia.com.ar.crt \
+#     --key=wildcard.paas-demo.bancogalicia.com.ar.key
+#
+# `tls.crt` TIENE QUE LLEVAR LA CADENA COMPLETA (hoja + intermedias), no sólo la hoja.
+# El origen valida contra el Secret `destino-ca` de `origen/04`, que lleva la CA raíz: si
+# falta una intermedia, Envoy no puede armar la cadena y el handshake falla. El síntoma es
+# un 503 genérico en el gateway de egreso que no señala a TLS por ningún lado.
+# Comprobarlo ANTES de aplicar nada:
+#
+#   openssl crl2pkcs7 -nocrl -certfile wildcard.paas-demo...crt | openssl pkcs7 -print_certs -noout
+#   -> tiene que listar la hoja Y las intermedias hasta la raíz que está en destino-ca
+#
+# Y el SAN, que es lo que Envoy valida (no el CN):
+#
+#   openssl x509 -in wildcard.paas-demo...crt -noout -text | grep -A1 'Subject Alternative Name'
+#
+# SIN `hostname` EN EL LISTENER, a propósito
+#
+# El egreso NO reescribe el Host (README §4): el request llega con
+# `Host: server2.echoserver.svc.cluster.local:8080` y sólo el SNI dice `app2...`. Un
+# listener con `hostname` matchea contra el SNI, así que técnicamente andaría — pero si el
+# valor no coincide con algún SAN, el TLS resetea con "no peer certificate available" y el
+# diagnóstico es confuso. Es la misma conclusión de `destino/10` y del runbook de ingress
+# §7.1. Contrapartida: este listener es catch-all, aceptable en un gateway dedicado.
+#
+# VERIFICACIÓN
+#
+#   oc -n echoserver get gateway ingress-gw \
+#     -o jsonpath='{range .status.listeners[*]}{.name}{": "}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+#   -> Accepted=True Programmed=True ResolvedRefs=True
+#
+# `ResolvedRefs=True` NO prueba que el certificado haya llegado al proxy: se calcula
+# contra lo que istiod puede leer y la entrega por SDS se evalúa después (es el bloqueo
+# abierto del runbook de ingress §7.2). El único indicador confiable es el config dump:
+#
+#   POD=$(oc -n echoserver get pod -l gateway.networking.k8s.io/gateway-name=ingress-gw -o name | head -1)
+#   oc -n echoserver exec $POD -- curl -s localhost:15000/config_dump?resource=dynamic_active_secrets \
+#     | grep -o '"name": "[^"]*"'
+#
+# El Service que autodespliega istiod —y al que apunta la Route de 22— es:
+#
+#   oc -n echoserver get svc ingress-gw-openshift-default -o jsonpath='{.spec.clusterIP} {.spec.ports}{"\n"}'

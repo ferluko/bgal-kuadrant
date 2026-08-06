@@ -10,6 +10,7 @@
 > | Procedimiento para ejecutar hoy | [§6.1](#61-procedimiento-vigente--sin-cluster-destino-real) |
 > | Batería de verificación (37 chequeos) | [`sim-destino/run-escenarios.sh`](sim-destino/run-escenarios.sh) |
 > | Destino simulado, banco de pruebas del origen | [`sim-destino/`](sim-destino/) |
+> | Destino en otro cluster OpenShift | [`destino-ocp/`](destino-ocp/README.md) |
 > | Lo que falta del lado EKS | [pedido-jwks-eks.md](pedido-jwks-eks.md) |
 > | Workload que hace la cascada | [`../echoserver-cascada/`](../echoserver-cascada/) |
 
@@ -54,7 +55,8 @@ reutiliza el patrón para otro consumidor.
 | FQDN del destino | `app2.paas-demo.bancogalicia.com.ar` | CNAME al NLB de EKS |
 | URL interna que NO cambia | `http://server2.echoserver.svc.cluster.local:8080` | lo que consume `server` |
 | Cluster origen | `paas-arqlab` — OCP 4.20, IPI vSphere, RHCL 1.3 | |
-| Cluster destino | **EKS** | Istio + Gateway API; ver §5.3 |
+| Cluster destino | **`paas-dev1-lowmz`** — OCP 4.20, otro sitio (CMZ) | publicado por el router HAProxy; ver [`destino-ocp/`](destino-ocp/README.md) |
+| Cluster destino (variante original) | **EKS** | Istio + Gateway API; ver §5.3. Queda fuera de juego al mover el CNAME de `app2` |
 | Gateway de ingress (origen) | `gw-hostnet` / ns `connlink-ingress` / class `ingress-hostnet` | hostNetwork, publicado por F5 |
 | Gateway de egreso (origen) | `egress-gw` / ns `echoserver` / class `openshift-default` | ClusterIP |
 | Gateway de ingreso (destino) | `ingress-gw` / ns `echoserver` / class `istio` | NLB internal, passthrough |
@@ -88,7 +90,7 @@ del equipo de la app.
 
 Esto **no es sólo un cambio de ubicación**: rompe el modelo de aislamiento que buscabas y deja el
 patrón sin multi-tenancy hasta que se resuelva. Es una limitación abierta, desarrollada en §8bis y
-registrada como **OQ-11**. Si aun así querés HMAC estricto, está el camino en §8.6 (requiere un firmador propio) y
+registrada como **OQ-11**. Si aun así querés HMAC estricto, está el camino en §8.7 (requiere un firmador propio) y
 la variante Istio, que sí acepta JWKS `oct`, en
 [destino/13a-istio-jwt-validation.yaml](destino/13a-istio-jwt-validation.yaml).
 
@@ -290,6 +292,21 @@ Que el destino sea EKS y no otro OpenShift cambia cuatro cosas. Ninguna es opcio
    origen validaría un certificado de Amazon y habría que cambiar la CA del `DestinationRule`
    (`origen/04`). Es una decisión válida, pero explícita.
 
+### 5.3bis. Destino alternativo: otro cluster OpenShift (`paas-dev1-lowmz`)
+
+Que el destino sea OpenShift en vez de EKS **no cambia nada del lado origen** —mismo FQDN,
+mismos claims, mismos manifiestos— y cambia una sola cosa del lado destino: cómo se
+publica el Gateway. Sin proveedor de LoadBalancer en vSphere IPI, entra por el **router
+HAProxy** con una Route de **`passthrough`**, que elige el backend por **SNI** y por lo
+tanto no se pelea con la decisión de no reescribir el `Host` (§4). Con `edge` o
+`reencrypt` el router rutearía por `Host` y daría 503 en el 100% del tráfico.
+
+Es además el camino con menos incógnitas abiertas: no depende de la clave pineada en EKS
+ni del pool de MetalLB, y ejercita por primera vez el **RTT entre sitios** y el **skew de
+reloj entre clusters**, que es el modo de falla del `exp: 300` que la simulación local no
+puede mostrar. El kit completo, con sus gates, está en
+[`destino-ocp/`](destino-ocp/README.md).
+
 ### 5.4. Placeholders a reemplazar
 
 | Placeholder | Dónde |
@@ -323,6 +340,11 @@ respecto de §6.1 cambian tres cosas y nada más:
    ([`sim-destino/06`](sim-destino/06-serviceentry-sim.yaml) queda idéntico a `origen/02`), y se
    carga la cadena de la CA del destino en el Secret `destino-ca`.
 3. Se agrega la fase 0 de espejo, que hasta ahora no se pudo ejercitar.
+
+Con destino en **otro OpenShift** ([`destino-ocp/`](destino-ocp/README.md)) los tres puntos
+son los mismos, con dos ventajas: la clave pineada la administramos nosotros, y el paso 2
+se puede diferir —el endpoint fijado a la ingress VIP valida todo el camino salvo la
+resolución del nombre, así que el corte del CNAME queda al final y no como prerrequisito.
 
 ### 6.1. Procedimiento vigente — sin cluster destino real
 
@@ -745,14 +767,50 @@ de esto:
    > regenera ([H10](HALLAZGOS.md#h10)). Se resuelve con `traceparent` o con un `EnvoyFilter`
    > que ponga `preserve_external_request_id: true`. Definirlo **antes** de que haya dos
    > clusters, no después.
-5. **`aud` por destino.** Un `aud` distinto por servicio destino evita que un token emitido para
-   `server2` sirva contra otro backend del mismo gateway de ingreso.
-6. **Si se insiste con HMAC:** agregar un firmador propio (Deployment que lee el Secret y expone
+5. **Subdominio privado y estrategia de tráfico east-west entre clusters.** Hoy el salto usa
+   `app2.paas-demo.bancogalicia.com.ar`: la zona de publicación de aplicaciones, con nombres de
+   laboratorio (`app1`/`app2`/`app3`) que no sobreviven a producción. Conviene una **zona interna
+   dedicada al tráfico este-oeste**, on-prem ↔ cloud.
+
+   *Por qué se puede sin costo de rediseño:* ese FQDN es un detalle interno del salto. Aparece
+   sólo en `origen/02` (`hosts`), `origen/04` (`host` y `sni`) y el `name` de los
+   `backendRef kind: Hostname`. **No viaja en ningún header** — el `Host` sigue siendo el nombre
+   interno del consumidor y el destino enruta por él (§4, confirmado en [H12](HALLAZGOS.md#h12)).
+   Sirve para resolver una IP y elegir un certificado, nada más.
+
+   *Por qué conviene:* no se mezclan clases de exposición —esto es máquina-a-máquina, sin
+   usuarios, alcanzable sólo desde otro cluster— y no se publican IPs privadas de la VPC en la
+   zona de aplicaciones. Además el nombre pasa a decir qué es.
+
+   *Qué hay que definir:*
+   - **Convención de nombres.** Un FQDN **por gateway de destino**, no por servicio: el ruteo
+     fino adentro ya lo hace el `Host` interno. Por ejemplo
+     `<cluster-destino>.egress.bancogalicia.com.ar`.
+   - **Certificados.** Es el requisito caro: el nombre elegido tiene que estar en el SAN del
+     certificado que presenta el destino, emitido por una CA que el origen confíe. Definir quién
+     los emite y cómo rotan.
+   - **Resolución.** Tiene que resolver desde **CoreDNS**, no desde el bastión. Y el registro
+     pasa a ser parte del contrato entre clusters: repuntarlo es un evento de migración.
+   - **Qué NO usar:** el nombre del NLB de AWS como SNI. Está en el SAN y ahorra crear el
+     registro, pero lo genera AWS y cambia si el balanceador se recrea — sería atar la
+     configuración del origen a un identificador que no controlamos.
+
+6. **`aud` por destino, y desacoplado del hostname.** Un `aud` distinto por servicio destino
+   evita que un token emitido para `server2` sirva contra otro backend del mismo gateway de
+   ingreso.
+
+   Hoy el `aud` **es** el FQDN, lo que ata el contrato del token al nombre de red: cambiar el
+   subdominio obliga a cambiar el `aud` en el origen y en la validación del destino, coordinado,
+   o todo pasa a dar 403. El `aud` no necesita ser un hostname — conviene un identificador
+   lógico del servicio (`server2.echoserver@eks`). Con eso el nombre de red queda libre: se puede
+   renombrar o mover de zona sin tocar el contrato de seguridad. **Hacer este cambio junto con el
+   punto 5**: es el mismo par de archivos y evita una segunda coordinación con el destino.
+7. **Si se insiste con HMAC:** agregar un firmador propio (Deployment que lee el Secret y expone
    `/token`), invocarlo desde `metadata.http` del `AuthPolicy` de egreso con `cache.ttl`, e
    inyectar el resultado con `plain.expression`. Validación en destino con `RequestAuthentication`
    + JWKS `oct`. Más piezas, el secreto replicado en ambos clusters, y sin la asimetría que hace
    seguro el esquema actual — por eso no es el default.
-7. **Multi-tenancy de la clave de firma — ver §8bis. Es una limitación abierta, no un pendiente
+8. **Multi-tenancy de la clave de firma — ver §8bis. Es una limitación abierta, no un pendiente
    menor: si no se resuelve, el patrón no es multi-tenant.**
 
 ## 8bis. Limitación abierta: dónde vive la clave de firma y quién puede usarla
@@ -869,7 +927,17 @@ sim-destino/                                   DESTINO SIMULADO: migrar sin EKS 
   04-jwks-static.yaml                          JWKS pineado (el ConfigMap sale de keys/out/)
   05-authpolicy-jwt.yaml                       validación del wristband del lado destino
   06-serviceentry-sim.yaml                     ORIGEN: el FQDN real con endpoints fijados
-  run-escenarios.sh                            batería E0-E5 con veredicto PASS/FALLA/SKIP
+  run-escenarios.sh                            batería E0-E5, PASS/FALLA/SKIP; sirve para
+                                               los tres destinos (ver sus variables)
+destino-ocp/                                   DESTINO EN OTRO OPENSHIFT (paas-dev1-lowmz)
+  20-namespace-server2.yaml                    server2 remoto (marcado SIM_SITE=dev1-lowmz)
+  21-gateway-ingress.yaml                      Gateway HTTPS:443 ClusterIP + wildcard real
+  22-route-passthrough.yaml                    publicación por el router HAProxy — pieza nueva
+  23-httproute-server2.yaml                    ruta a server2, sin hostnames
+  24-jwks-static.yaml                          JWKS pineado, copiado del origen
+  25-authpolicy-jwt.yaml                       validación del wristband, claims sin cambios
+  26-serviceentry-origen.yaml                  ORIGEN: endpoint a la VIP, hasta mover el CNAME
+  preflight.sh                                 gates previos (L3, RHCL, cert, skew de reloj)
 ```
 
 Fuera de este directorio, pero requisito de la validación (§7.0):

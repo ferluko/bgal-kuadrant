@@ -1,0 +1,115 @@
+# Cluster DESTINO OCP — publicación del Gateway a través del router HAProxy.
+#
+# ES LA ÚNICA PIEZA QUE NO EXISTE EN NINGUNA DE LAS OTRAS VARIANTES DEL DESTINO, y la que
+# decide si todo el diseño funciona en un destino OpenShift. Vale la pena leer entero el
+# porqué antes de tocarla.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────
+# POR QUÉ TIENE QUE SER `passthrough`, Y NO `edge` NI `reencrypt`
+#
+# El egreso NO reescribe el Host (README §4). El request que sale del origen viaja así:
+#
+#     Host: server2.echoserver.svc.cluster.local:8080     <- el del cliente original
+#     SNI:  app2.paas-demo.bancogalicia.com.ar            <- lo fija origen/04 (DestinationRule)
+#
+# Y el router elige el backend con criterios distintos según la terminación:
+#
+#   passthrough      -> HAProxy trabaja en modo TCP y elige por el **SNI del ClientHello**.
+#                       No descifra, no ve —ni le importa— el header Host. El SNI es
+#                       `app2...`, que es el `host` de esta Route: matchea. El TLS lo
+#                       termina el Envoy del Gateway (21), que es lo que mantiene el mismo
+#                       modelo de confianza del diseño con NLB en passthrough.
+#
+#   edge / reencrypt -> HAProxy termina TLS y elige por el header **Host**, que acá es
+#                       `server2.echoserver.svc.cluster.local:8080`. Ninguna Route del
+#                       cluster declara ese host: **503 del router**, y el síntoma no
+#                       señala a la causa. Además el origen pasaría a validar el
+#                       certificado del router en vez del del gateway — el mismo problema
+#                       que el README rechaza explícitamente para el caso del ALB con ACM.
+#
+# La alternativa sería volver a poner el `URLRewrite` del Host en el origen, pero eso
+# choca con que Istio no soporta filtros a nivel de `backendRef` (istio#39136): con dos
+# backends en la misma rule el filtro aplicaría también al backend local. O sea que se
+# perdería el split por peso, que es la herramienta central de la migración progresiva.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────
+# CONSECUENCIAS DE ELEGIR passthrough
+#
+#  - La Route NO puede declarar `path`: en passthrough el router no ve la URL. Se publica
+#    el host entero, y el ruteo fino lo hace el HTTPRoute (23) adentro del Gateway.
+#  - No hay `X-Forwarded-For`: la IP de origen que ve el destino es la del router. No
+#    afecta a la PoC —la procedencia viaja en los claims del wristband, no en la IP— pero
+#    conviene saberlo antes de escribir una NetworkPolicy que dependa de eso.
+#  - Un solo Route de passthrough por host en todo el cluster. Si ya existe otra con este
+#    host, gana la más vieja y esta queda con `HostAlreadyClaimed`.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: app2-egress-passthrough
+  namespace: echoserver
+  labels:
+    poc.galicia.io/rol: destino-ocp
+spec:
+  # El FQDN del salto entre clusters. Está FUERA del dominio de apps del cluster
+  # (`apps.paas-dev1-lowmz.bancogalicia.com.ar`), lo cual el router admite sin problema
+  # —sirve el host que la Route declare— pero crear una Route con `spec.host` arbitrario
+  # exige permiso sobre el subrecurso `routes/custom-host`. Con cluster-admin está; con un
+  # rol de equipo de aplicación, probablemente no:
+  #
+  #   oc auth can-i create routes/custom-host -n echoserver
+  host: app2.paas-demo.bancogalicia.com.ar
+  to:
+    kind: Service
+    # Service que autodespliega istiod para el Gateway de 21: <nombre-del-gateway>-<clase>.
+    # Confirmarlo antes de aplicar, porque si no existe la Route queda sin endpoints y el
+    # router devuelve 503:
+    #   oc -n echoserver get svc ingress-gw-openshift-default
+    name: ingress-gw-openshift-default
+    weight: 100
+  port:
+    # El puerto del Service, no el del pod. Se declara por número para no depender de cómo
+    # istiod nombre el puerto del listener, que ha cambiado entre versiones. Verificar:
+    #   oc -n echoserver get svc ingress-gw-openshift-default -o jsonpath='{.spec.ports}{"\n"}'
+    targetPort: 443
+  tls:
+    termination: passthrough
+    # Con passthrough los únicos valores válidos son None y Redirect. `None` deja el :80
+    # sin publicar, que es lo correcto: este flujo es TLS o nada.
+    insecureEdgeTerminationPolicy: None
+  wildcardPolicy: None
+---
+# VERIFICACIÓN
+#
+# 1) La Route quedó admitida por el router:
+#
+#   oc -n echoserver get route app2-egress-passthrough \
+#     -o jsonpath='{range .status.ingress[*]}{.routerName}{" "}{.conditions[?(@.type=="Admitted")].status}{" "}{.conditions[?(@.type=="Admitted")].reason}{"\n"}{end}'
+#   -> default True
+#
+#   `Admitted=False` con reason `HostAlreadyClaimed`: ya hay otra Route con ese host en
+#   otro namespace. `RouteNotAdmitted` con mensaje de permisos: falta routes/custom-host.
+#
+# 2) El SNI llega y elige el backend correcto. Es LA prueba de esta pieza, y se corre
+#    desde afuera del cluster destino contra la VIP del router, sin depender del DNS:
+#
+#   openssl s_client -connect 10.254.34.2:443 \
+#     -servername app2.paas-demo.bancogalicia.com.ar </dev/null 2>/dev/null \
+#     | openssl x509 -noout -subject -issuer -dates
+#
+#   Tiene que devolver el WILDCARD `*.paas-demo.bancogalicia.com.ar` emitido por la CA del
+#   banco. Si devuelve el certificado del router (`*.apps.paas-dev1-lowmz...`), el SNI no
+#   matcheó ninguna Route de passthrough y HAProxy cayó en su certificado default: la
+#   Route no está admitida, o el host no coincide exactamente.
+#
+# 3) El mismo handshake pero pidiendo un GET sin token, que tiene que dar 401 (es la
+#    prueba negativa (a) del README §7.4, ejecutable por primera vez contra un destino
+#    real). Ojo con mandar el Host interno, no el FQDN — es lo que va a mandar el origen:
+#
+#   curl -sS -o /dev/null -w '%{http_code}\n' \
+#     --resolve app2.paas-demo.bancogalicia.com.ar:443:10.254.34.2 \
+#     -H 'Host: server2.echoserver.svc.cluster.local:8080' \
+#     https://app2.paas-demo.bancogalicia.com.ar/
+#   -> 401
+#
+#   Un 200 acá es peor que un 404: significa que el destino contesta sin exigir token.
+#   Un 503 es del router (Route sin endpoints o gateway caído), no del destino.

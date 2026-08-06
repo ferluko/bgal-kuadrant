@@ -7,7 +7,9 @@
 #   ./run-escenarios.sh --expirado       # suma la prueba (c): espera >300s a que caduque un token
 #   ./run-escenarios.sh --aplicar --pesos --expirado
 #
-# Variables: URL, HOST, NS, NS_SIM, FQDN (ver abajo).
+# Variables: URL, HOST, NS, NS_SIM, FQDN, y las del destino —CTX_DST, GW_DST, SVC_DST,
+# DST_IP, SITE— que permiten correr la misma batería contra el destino OCP real de
+# `../destino-ocp/` en vez del simulado (ver abajo).
 #
 # Cada escenario dice QUÉ PRUEBA antes de correr, y cada chequeo termina en PASS / FALLA /
 # SKIP con el valor obtenido al lado. Al final, un resumen y exit code 0/1.
@@ -24,6 +26,19 @@ NS_SIM="${NS_SIM:-echoserver-eks-sim}"
 FQDN="${FQDN:-app2.paas-demo.bancogalicia.com.ar}"
 HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# El destino no tiene por qué estar en este cluster: con estas cuatro variables la misma
+# batería corre contra el destino OCP real de `destino-ocp/`. Con los defaults —CTX_DST y
+# DST_IP vacíos— todo se resuelve contra el contexto actual, que es el comportamiento de
+# siempre y el del destino simulado.
+#
+#   CTX_DST=paas-dev1-lowmz NS_SIM=echoserver GW_DST=ingress-gw \
+#   DST_IP=10.254.34.2 SITE=dev1-lowmz ./run-escenarios.sh
+CTX_DST="${CTX_DST:-}"                              # contexto de oc del cluster destino
+GW_DST="${GW_DST:-ingress-sim}"                     # nombre del Gateway de ingreso del destino
+SVC_DST="${SVC_DST:-${GW_DST}-openshift-default}"   # Service que autodespliega istiod
+DST_IP="${DST_IP:-}"                                # si se setea, reemplaza a la ClusterIP
+SITE="${SITE:-eks-sim}"                             # valor de SIM_SITE que marca al destino
 
 APLICAR=0; PESOS=0; EXPIRADO=0
 for a in "$@"; do case "$a" in
@@ -52,7 +67,10 @@ tiene(){ [[ "$2" == *"$3"* ]] && ok "$1" "$2" || bad "$1" "$2" "que contenga $3"
 
 req()  { curl -s --max-time 15 -H "Host: $HOST" "$@" "$URL/"; }
 f()    { printf '%s' "${1:-}" | jq -r "${2} // \"null\"" 2>/dev/null || echo "null"; }
-existe(){ oc get "$1" "$2" ${3:+-n "$3"} >/dev/null 2>&1; }
+# Todo lo del lado destino pasa por acá, para que el mismo escenario sirva con el destino
+# simulado (mismo cluster) y con el destino OCP real (otro cluster).
+ocd()       { oc ${CTX_DST:+--context="$CTX_DST"} "$@"; }
+existe_dst(){ ocd get "$1" "$2" ${3:+-n "$3"} >/dev/null 2>&1; }
 
 # Petición TLS directa al destino simulado, con SNI del FQDN real y un token arbitrario.
 # Va por `oc exec` al pod `server` (tiene python3) en vez de crear un pod por prueba:
@@ -135,6 +153,7 @@ aplicar_fase() {
 
 printf '%sPoC egreso Kuadrant — batería de escenarios%s\n' "$B" "$Z"
 nota "entrada: $URL  Host: $HOST     ns: $NS / $NS_SIM"
+nota "destino: ${CTX_DST:-mismo cluster}  gateway: $GW_DST  marcador: SIM_SITE=$SITE${DST_IP:+  ip: $DST_IP}"
 for b in oc jq curl; do command -v $b >/dev/null || { echo "falta '$b' en el PATH"; exit 2; }; done
 
 # ─────────────────────────────────────────────────────────────────────────────────────
@@ -193,19 +212,21 @@ nota "latencia hop1->hop2: $(f "$J" '.upstream.latencyMs') ms"
 esc "E2 — Destino simulado" \
     "que existe un destino que VALIDA el token, y que rechaza lo que tiene que rechazar"
 
-if ! existe ns "$NS_SIM"; then
+if ! existe_dst ns "$NS_SIM"; then
   skip "todo el escenario E2" "falta el ns $NS_SIM — ver sim-destino/README.md §4"
   SIM=0
 else
   SIM=1
-  PROG=$(oc -n "$NS_SIM" get gateway ingress-sim -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
+  PROG=$(ocd -n "$NS_SIM" get gateway "$GW_DST" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
   eq "Gateway del destino Programmed" "${PROG:-null}" "True"
 
-  AP=$(oc -n "$NS_SIM" get authpolicy server2-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
+  AP=$(ocd -n "$NS_SIM" get authpolicy server2-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
   eq "AuthPolicy del destino Accepted/Enforced" "${AP:-null}" "True/True"
 
-  SIMIP=$(oc -n "$NS_SIM" get svc ingress-sim-openshift-default -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
-  KIDJ=$(oc -n "$NS_SIM" get cm jwks-egress-origen -o jsonpath='{.data.jwks\.json}' 2>/dev/null | jq -r '.keys[0].kid' 2>/dev/null)
+  # Con el destino en otro cluster la ClusterIP no sirve de nada desde acá: se entra por la
+  # ingress VIP y el router elige la Route de passthrough por SNI (destino-ocp/22).
+  SIMIP="${DST_IP:-$(ocd -n "$NS_SIM" get svc "$SVC_DST" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)}"
+  KIDJ=$(ocd -n "$NS_SIM" get cm jwks-egress-origen -o jsonpath='{.data.jwks\.json}' 2>/dev/null | jq -r '.keys[0].kid' 2>/dev/null)
   eq "kid del JWKS == kid del token" "${KIDJ:-null}" "${KID:-sin-token}"
 
   if [[ -n "${SIMIP:-}" ]]; then
@@ -234,12 +255,16 @@ else
 
   if hay_canary; then
     C=$(req -H 'x-canary: true')
-    eq "con x-canary -> destino"          "$(f "$C" '.upstream.body.environment.SIM_SITE')" "eks-sim"
+    eq "con x-canary -> destino"          "$(f "$C" '.upstream.body.environment.SIM_SITE')" "$SITE"
     eq "con x-canary -> status"           "$(f "$C" '.upstream.status')" "200"
     eq "EL DESTINO VALIDÓ EL JWT"         "$(f "$C" '.upstream.body.request.headers["x-forwarded-src-cluster"]')" "paas-arqlab"
     eq "  y propagó el namespace"         "$(f "$C" '.upstream.body.request.headers["x-forwarded-src-namespace"]')" "$NS"
     eq "  Host sigue sin reescribir"      "$(f "$C" '.upstream.body.request.headers.host')" "$HOST_INTERNO"
-    nota "latencia al destino: $(f "$C" '.upstream.latencyMs') ms  (sin RTT real: el stand-in es local)"
+    if [[ -n "$CTX_DST" ]]; then
+      nota "latencia al destino: $(f "$C" '.upstream.latencyMs') ms  (incluye RTT entre sitios + handshake TLS)"
+    else
+      nota "latencia al destino: $(f "$C" '.upstream.latencyMs') ms  (sin RTT real: el stand-in es local)"
+    fi
 
     N=$(req)
     eq "sin el header -> sigue local"     "$(f "$N" '.upstream.body.environment.SIM_SITE')" "null"
@@ -262,7 +287,7 @@ esc "E4 — Reparto por peso" "que 'weight' funciona sobre un backendRef kind:Ho
       LOC=0; REM=0; ERR=0
       for _ in $(seq 1 100); do
         case "$(req | jq -r '.upstream.body.environment.SIM_SITE // (if .upstream.status==200 then "local" else "err" end)' 2>/dev/null)" in
-          eks-sim) REM=$((REM+1)) ;; local) LOC=$((LOC+1)) ;; *) ERR=$((ERR+1)) ;;
+          "$SITE") REM=$((REM+1)) ;; local) LOC=$((LOC+1)) ;; *) ERR=$((ERR+1)) ;;
         esac
       done
       nota "local=$LOC  destino=$REM  errores=$ERR   (esperado ~75/25)"

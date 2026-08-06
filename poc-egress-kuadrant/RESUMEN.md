@@ -131,8 +131,15 @@ Por orden de peso:
    punta a punta contra EKS, y no depende de nosotros: ver [`pedido-jwks-eks.md`](pedido-jwks-eks.md).
    En la misma ventana conviene cargar la cadena de la CA del destino en el Secret `destino-ca`
    del origen, para poder validar TLS sin `insecureSkipVerify`.
-4. **Rotación de la clave** y `aud` por destino.
-5. **Observabilidad**: métricas por backend y trazas propagadas, que además son el criterio
+4. **Subdominio privado y estrategia de tráfico east-west.** Hoy el salto usa la zona de
+   publicación de aplicaciones, con nombres de laboratorio. Conviene una zona interna dedicada al
+   tráfico entre clusters, on-prem ↔ cloud: no mezcla clases de exposición y no publica IPs
+   privadas de la VPC en la zona de apps. Se puede cambiar sin rediseño —ese FQDN no viaja en
+   ningún header, sólo resuelve una IP y elige un certificado— pero hay que definir convención de
+   nombres, emisión y rotación de certificados, y resolución desde CoreDNS. Ver §8.5 del README.
+5. **Rotación de la clave**, y un `aud` por destino **desacoplado del hostname**: hoy el `aud`
+   *es* el FQDN, así que renombrar el dominio rompe el contrato del token. Va junto con el punto 4.
+6. **Observabilidad**: métricas por backend y trazas propagadas, que además son el criterio
    objetivo para avanzar de fase en el rollout.
 
 ## 7. Por dónde seguir
