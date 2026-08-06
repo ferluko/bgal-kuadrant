@@ -21,6 +21,7 @@ al lado equivocado**. Ninguno se detectó con un objeto en rojo — todos daban 
 | [H11](#h11) | El claim `sub` no identifica a nadie | seguridad |
 | [H12](#h12) | El destino real confirma que el Host viaja sin reescribir | diseño |
 | [H13](#h13) | La prueba negativa de firma alterada no alteraba nada | validación |
+| [H14](#h14) | **El pool de conexiones no estaba en el diseño, y sin él el egreso no aguanta concurrencia** | capacidad |
 | [H14](#h14) | Falta un certificado y el error aparece en la AuthPolicy | Gateway API |
 
 ---
@@ -61,6 +62,50 @@ clusters montados y la red abierta.
 
 **Para el ADR:** la Opción B (Kuadrant validando en el destino) es viable, pero **no con la
 configuración obvia**. Conviene que la excepción del ADR lo diga.
+
+---
+
+<a id="h14"></a>
+## H14. El pool de conexiones no estaba en el diseño — 2026-08-06
+
+**El hallazgo que sólo podía aparecer con el destino real.** Con RTT cero contra el stand-in
+local, abrir una conexión es gratis; el problema es literalmente invisible.
+
+Sin `connectionPool` en el `DestinationRule`, con ~170 ms de RTT y concurrencia, Envoy abre y
+cierra conexiones sin parar:
+
+| | sin pool | con pool |
+|---|---|---|
+| p50 al destino (x40) | 245 ms | **184 ms** (el piso del RTT) |
+| p90 | 434 ms | 238 ms |
+| p99 | 466 ms | 420 ms |
+| throughput | 181 req/s | **266 req/s** |
+| errores | 503 `URX,UF`, ~1 s cada uno | **cero** |
+| conexiones | ~1 por request | **55 para 3829 requests** |
+
+`URX,UF` es *fallo de conexión con reintentos agotados*. Y el p99 de 530 ms sin pool es
+exactamente **3 RTT**: TCP + TLS + datos, o sea un handshake completo por request.
+
+Los contadores del cluster lo cierran: `cx_total 55`, `cx_active 52`, `cx_connect_fail 0`,
+`rq_total 3829`. Cero fallos de conexión — el NLB nunca rechazó nada. Los `UF` eran consecuencia
+de la churn de conexiones, no de un límite del lado AWS.
+
+**Dos números que hay que respetar:**
+
+- **`idleTimeout: 300s` tiene que quedar por debajo de los 350 s del NLB de AWS**, que no son
+  configurables. Reciclar antes que el balanceador evita conexiones medio abiertas y los resets
+  esporádicos que producen. Subirlo de 350 s reintroduce el problema.
+- `maxConnections: 64` cubre los ~48 requests en vuelo a 266 req/s. La cola que queda (p99 420)
+  ya no es establecimiento —`cx_total` no crece— sino espera por conexión libre: está al filo.
+
+**No es HTTP/2.** Con 52 conexiones activas para ~48 requests en vuelo, el upstream sigue en
+HTTP/1.1: el `h2UpgradePolicy: UPGRADE` no tomó efecto. Lo que resolvió el problema fue mantener
+el pool caliente, no multiplexar. Forzar h2 exige `protocol: HTTP2` en el `ServiceEntry`, y ahí
+**hay que verificar que el `x-egress-token` se siga inyectando** antes de darlo por bueno.
+
+**Consecuencia:** el bloque está persistido en `origen/04-destinationrule-tls.yaml`. Antes vivía
+sólo como un `oc patch` en el cluster, así que un `apply` del archivo lo habría borrado y los 503
+habrían vuelto sin explicación aparente.
 
 ---
 

@@ -12,6 +12,33 @@ spec:
   # <<< PLACEHOLDER: mismo FQDN que el ServiceEntry
   host: app2.paas-demo.bancogalicia.com.ar
   trafficPolicy:
+    # POOL DE CONEXIONES — NO ES OPCIONAL. Medido en paas-arqlab (2026-08-06) contra EKS real.
+    #
+    # Sin este bloque, con ~170 ms de RTT y concurrencia, Envoy abre y cierra conexiones sin
+    # parar: aparecen 503 con response_flags URX,UF (fallo de conexión con reintentos agotados,
+    # ~1 s cada uno) y el p99 se va a ~530 ms, que es exactamente 3 RTT — un handshake completo.
+    # Con el pool: 55 conexiones para 3829 requests (~70 req por conexión), cx_connect_fail=0,
+    # cero errores, p50 en el piso del RTT y 266 req/s sostenidos.
+    #
+    # Esto NO se puede descubrir contra un destino local: con RTT cero, abrir una conexión es
+    # gratis y el problema es invisible. Apareció recién con el destino real.
+    connectionPool:
+      tcp:
+        maxConnections: 64      # ~48 requests en vuelo a 266 req/s; 64 deja aire
+        connectTimeout: 5s
+      http:
+        # 300 s A PROPÓSITO: el idle timeout del NLB de AWS es de 350 s y NO es configurable.
+        # Reciclar ANTES que el balanceador evita conexiones medio abiertas y los resets
+        # esporádicos que eso produce. No subir de 350 s.
+        idleTimeout: 300s
+        maxRequestsPerConnection: 0   # 0 = no reciclar la conexión por cantidad de requests
+        h2UpgradePolicy: UPGRADE      # sin efecto observado: el upstream sigue en HTTP/1.1
+                                      # (52 conexiones activas para ~48 requests en vuelo).
+                                      # Se deja porque no molesta; si alguna vez toma, el pool
+                                      # se reduce a 1-2 conexiones. Para forzarlo de verdad hay
+                                      # que declarar `protocol: HTTP2` en el ServiceEntry (02),
+                                      # y ahí HAY QUE VERIFICAR que el x-egress-token se siga
+                                      # inyectando antes de darlo por bueno.
     portLevelSettings:
       - port:
           number: 443

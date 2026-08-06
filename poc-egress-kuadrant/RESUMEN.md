@@ -1,6 +1,7 @@
 # Egreso seguro entre clusters con Kuadrant — resumen técnico
 
-**PoC cerrada en `paas-arqlab` el 2026-08-05. 37 chequeos automatizados, todos en verde.**
+**PoC cerrada en `paas-arqlab`. 37 chequeos automatizados en verde (2026-08-05) y camino de
+punta a punta validado contra el cluster EKS real (2026-08-06).**
 
 Cómo mover un servicio a otro cluster sin tocar a quien lo consume, con el salto autenticado y
 la migración reversible en cualquier momento.
@@ -60,6 +61,21 @@ veredicto por línea. Última corrida:
 | **E3** Canary | `x-canary: true` va al destino **y el destino lo autoriza**; sin el header, el tráfico normal ni se entera | ✅ |
 | **E4** Pesos | reparto 75/25 sobre un `backendRef kind: Hostname` → 71/29 medido, cero errores | ✅ |
 
+Y desde el 2026-08-06, **medido contra el cluster EKS real**, no contra el stand-in:
+
+| | |
+|---|---|
+| Latencia mediana al destino | **178 ms** en el gateway · 184 ms visto por el cliente |
+| De eso, costo del patrón | **~11 ms** — el resto es RTT a `us-east-1` |
+| p90 / p99 | 238 / 420 ms |
+| Throughput sostenido | **266 req/s**, cero errores |
+| Reuso de conexión | 70 requests por conexión |
+| Backend local bajo carga | p50 11,6 ms — **no se degrada** |
+
+Eso exigió un `connectionPool` que no estaba en el diseño: sin él aparecen 503 por fallo de
+conexión y el p99 se va a 3 RTT ([H14](HALLAZGOS.md#h14)). **Es el hallazgo que el simulador no
+podía dar**, porque con RTT cero abrir una conexión es gratis.
+
 Números que importan:
 
 - **Costo de la intercepción:** 10,4 ms directo → ~12 ms con el Envoy en el medio → ~21 ms con
@@ -76,16 +92,18 @@ suelto no hace llamadas salientes, así que el salto a migrar no existía. Ver
 
 Verde acá significa *"la mecánica funciona"*. No significa:
 
-- **El tramo de punta a punta contra el destino real.** El cluster EKS está alcanzable, con la
-  política desplegada y enforceando, y el certificado válido — pero **la clave pública pineada allá
-  quedó de una versión anterior**, así que todavía rechaza los tokens. Falta sincronizarla
-  ([`pedido-jwks-eks.md`](pedido-jwks-eks.md)); nada del lado origen cambia. Todo lo que se validó
-  hasta ahora se hizo contra un stand-in local ([`sim-destino/`](sim-destino/)) que conserva el
-  FQDN real.
-- **RTT inter-cluster ni skew de reloj.** El token nace y muere bajo el mismo reloj, así que el
-  modo de falla del `exp: 300` entre clusters queda intacto. Es de los que más se pagan en
-  producción.
-- **Capacidad.** Ninguna prueba de carga. El gateway pasa a estar en el camino crítico de la app.
+- **La validación TLS de la cadena.** Las mediciones del 2026-08-06 se hicieron con
+  `insecureSkipVerify`: el tráfico va cifrado pero el origen no verifica contra quién. La cadena
+  de la CA NoProd del banco ya está disponible; falta cargarla en el Secret `destino-ca` y volver
+  a medir para confirmar que no cambia nada (no debería: verificar la cadena es CPU, y Envoy no
+  consulta CRL ni OCSP por defecto).
+- **El skew de reloj entre clusters.** Los tokens frescos validan, así que el desfasaje está
+  dentro de los 300 s de vida — pero no se ejercitó un token cerca de su vencimiento contra el
+  destino real. Es la prueba negativa (c) y sigue pendiente.
+- **Capacidad más allá de 266 req/s.** Ese número es el techo *del instrumento de medición*, no
+  del camino: se alcanzó con el BFF ya escalado, pero sigue midiendo a través de él y con `curl`
+  por request desde el bastión. Para dimensionar de verdad hace falta un generador de carga
+  contra el gateway de egreso directamente.
 - **Clientes con pool de conexiones.** El BFF abre una conexión TCP por request, así que el
   cutover se ve instantáneo y sin errores. Un cliente con pool persistente (JVM, Go) va a tener
   una cola que esta PoC no puede mostrar.
