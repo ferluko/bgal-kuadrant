@@ -23,6 +23,10 @@ NS="${NS:-echoserver}"                                     # ns en el origen
 NS_DST="${NS_DST:-echoserver}"                             # ns en el destino
 HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
 CERT_SECRET="${CERT_SECRET:-paas-demo-wildcard-tls}"
+GW="${GW:-ingress-gw}"
+LISTENER="${LISTENER:-https}"
+ROUTE="${ROUTE:-server2}"
+POLICY="${POLICY:-server2-ingress-jwt}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -t 1 ]]; then V=$'\e[32m'; R=$'\e[31m'; A=$'\e[33m'; B=$'\e[1m'; D=$'\e[2m'; Z=$'\e[0m'
@@ -215,6 +219,66 @@ if [[ "$RES" == "$DST_IP" ]]; then
   nota "se puede aplicar origen/02 verbatim y borrar 26-serviceentry-origen.yaml"
 else
   skip "el CNAME todavía no se movió" "apunta a $RES — usar 26 (resolution: STATIC) hasta el corte"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+esc "P5 — Encadenamiento del montaje" \
+    "que las piezas no sólo existan, sino que estén ENGANCHADAS entre sí"
+
+# Validar cada objeto por separado no alcanza: el 2026-08-05 el GatewayClass, Kuadrant y el
+# JWKS estaban los tres bien y aun así la AuthPolicy no enforceaba, porque el listener no
+# tenía certificado y por eso el HTTPRoute nunca fue adoptado ([H14](../HALLAZGOS.md#h14)).
+# Este bloque recorre la escalera Secret -> listener -> Gateway -> HTTPRoute -> AuthPolicy.
+if ! ocd -n "$NS_DST" get gateway "$GW" >/dev/null 2>&1; then
+  skip "todo el escenario P5" "el Gateway $GW todavía no existe — normal antes del montaje"
+else
+  PROG=$(ocd -n "$NS_DST" get gateway "$GW" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
+  eq "Gateway Programmed" "${PROG:-null}" "True"
+  if [[ "${PROG:-}" != "True" ]]; then
+    nota "condiciones del listener $LISTENER:"
+    nota "  $(ocd -n "$NS_DST" get gateway "$GW" -o jsonpath="{range .status.listeners[?(@.name=='$LISTENER')]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{end}" 2>/dev/null)"
+    nota "un InvalidCertificateRef acá es la causa raíz de todo lo que falle más arriba"
+  fi
+
+  ATT=$(ocd -n "$NS_DST" get gateway "$GW" -o jsonpath="{.status.listeners[?(@.name=='$LISTENER')].attachedRoutes}" 2>/dev/null)
+  if [[ "${ATT:-0}" =~ ^[0-9]+$ ]] && (( ATT > 0 )); then
+    ok "routes attacheadas al listener $LISTENER" "$ATT"
+  else
+    bad "routes attacheadas al listener $LISTENER" "${ATT:-0}" ">0"
+  fi
+
+  if ocd -n "$NS_DST" get httproute "$ROUTE" >/dev/null 2>&1; then
+    # Si el status trae SÓLO condiciones kuadrant.io/*, el controller de Gateway API nunca
+    # procesó la route. Es el chequeo que decide en un comando de qué lado está el problema.
+    ACC=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[?(@.type=="Accepted")]}{.status}{end}{end}' 2>/dev/null)
+    RR=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[?(@.type=="ResolvedRefs")]}{.status}{end}{end}' 2>/dev/null)
+    [[ "$ACC" == *True* ]] && ok "HTTPRoute adoptado por el Gateway" "Accepted=True" \
+                           || { bad "HTTPRoute adoptado por el Gateway" "${ACC:-sin condición Accepted}" "True"
+                                nota "status completo: $(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status} {end}{end}' 2>/dev/null)"
+                                nota "sólo condiciones kuadrant.io/* => el problema está en el Gateway, no en la policy"; }
+    [[ "$RR" == *True* ]] && ok "backendRef server2:8080 resuelve" "ResolvedRefs=True" \
+                          || bad "backendRef server2:8080 resuelve" "${RR:-null}" "True"
+  else
+    skip "HTTPRoute $ROUTE" "todavía no aplicado"
+  fi
+
+  if ocd -n "$NS_DST" get authpolicy "$POLICY" >/dev/null 2>&1; then
+    AP=$(ocd -n "$NS_DST" get authpolicy "$POLICY" -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
+    eq "AuthPolicy Accepted/Enforced" "${AP:-null}" "True/True"
+    [[ "${AP:-}" != "True/True" ]] && nota "motivo: $(ocd -n "$NS_DST" get authpolicy "$POLICY" -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}' 2>/dev/null)"
+  else
+    skip "AuthPolicy $POLICY" "todavía no aplicada"
+  fi
+
+  if ocd -n "$NS_DST" get route app2-egress-passthrough >/dev/null 2>&1; then
+    AD=$(ocd -n "$NS_DST" get route app2-egress-passthrough -o jsonpath='{.status.ingress[0].conditions[?(@.type=="Admitted")].status}' 2>/dev/null)
+    eq "Route de passthrough admitida por el router" "${AD:-null}" "True"
+    TERM=$(ocd -n "$NS_DST" get route app2-egress-passthrough -o jsonpath='{.spec.tls.termination}' 2>/dev/null)
+    eq "terminación de la Route" "${TERM:-null}" "passthrough"
+    [[ "${TERM:-}" != "passthrough" ]] && nota "con edge/reencrypt el router rutea por Host y da 503 en el 100% del tráfico"
+  else
+    skip "Route de passthrough" "todavía no aplicada"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────────

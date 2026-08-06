@@ -128,7 +128,23 @@ oc --context=paas-dev1-lowmz apply -f 20-namespace-server2.yaml
 oc --context=paas-dev1-lowmz -n echoserver create secret tls paas-demo-wildcard-tls \
   --cert=wildcard.paas-demo.bancogalicia.com.ar.crt \
   --key=wildcard.paas-demo.bancogalicia.com.ar.key
+```
 
+**Gate: el Secret existe antes de aplicar el Gateway, no después.** Un listener sin su
+certificado no admite routes, y el error no aparece ahí sino tres escalones más arriba, en
+la AuthPolicy, con un mensaje que no nombra ni al Gateway ni al Secret — pasó el 2026-08-05
+y está en [H14](../HALLAZGOS.md#h14).
+
+```bash
+oc --context=paas-dev1-lowmz -n echoserver get secret paas-demo-wildcard-tls -o jsonpath='{.type}{"\n"}'
+oc --context=paas-dev1-lowmz -n echoserver get secret paas-demo-wildcard-tls -o jsonpath='{.data.tls\.crt}' \
+  | base64 -d | grep -c 'BEGIN CERTIFICATE'
+```
+
+Tiene que decir `kubernetes.io/tls` y **más de un certificado** (hoja + intermedias). Recién
+entonces:
+
+```bash
 oc --context=paas-dev1-lowmz apply -f 21-gateway-ingress.yaml -f 22-route-passthrough.yaml -f 23-httproute-server2.yaml
 ```
 
@@ -235,6 +251,40 @@ curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
 SNI haya sido `app2...`: es la confirmación de que el Host no se reescribe y de que el
 router no lo tocó.
 
+## 6bis. Diagnóstico cuando algo no engancha
+
+La cadena de Gateway API es una escalera y Kuadrant está al final:
+
+```
+Secret del cert ──► listener https:443 ──► Gateway ──► HTTPRoute ──► AuthPolicy
+```
+
+**Un escalón roto abajo se reporta arriba de todo**, y con un mensaje que no nombra al
+objeto culpable. El caso testigo: sin el Secret del wildcard, la `AuthPolicy` dice
+`Enforced=False: AuthPolicy is not in the path to any existing routes`, que manda a revisar
+el JWKS — donde no hay nada que arreglar ([H14](../HALLAZGOS.md#h14)).
+
+Por eso el diagnóstico se recorre **de abajo hacia arriba**, parando en el primer escalón
+roto. Eso hace [`27-reparar.sh`](27-reparar.sh), que además arregla lo que puede arreglar
+solo y es idempotente:
+
+```bash
+CTX_DST=paas-dev1-lowmz ./27-reparar.sh
+CTX_DST=paas-dev1-lowmz CRT=./wildcard.crt KEY=./wildcard.key ./27-reparar.sh   # crea el Secret si falta
+```
+
+El atajo que decide sin correr nada: mirar **qué condiciones tiene el HTTPRoute**.
+
+```bash
+oc --context=paas-dev1-lowmz -n echoserver get httproute server2 \
+  -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+```
+
+Si aparecen **sólo** condiciones con prefijo `kuadrant.io/`, el HTTPRoute no fue adoptado
+por ningún Gateway y el problema está en `21`/`22`, no en Kuadrant. Con `Accepted=True` y
+`ResolvedRefs=True` presentes, la escalera está entera y ahí sí tiene sentido mirar el JWKS,
+el `kid` o los claims.
+
 ## 7. El corte del CNAME — fase B
 
 Es el último paso y el único que cambia estado fuera de los clusters.
@@ -305,5 +355,6 @@ eso quedaría un `backendRef` apuntando a un host que ya no existe.
 24-jwks-static.yaml           DESTINO: JWKS pineado (el ConfigMap sale de ../keys/out/)
 25-authpolicy-jwt.yaml        DESTINO: validación del wristband, claims sin cambios
 26-serviceentry-origen.yaml   ORIGEN: endpoint fijado a la VIP — temporal, hasta el CNAME
+27-reparar.sh                 diagnóstico y reparación en cadena, de abajo hacia arriba
 preflight.sh                  gates previos, sólo lectura, dos contextos
 ```

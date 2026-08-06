@@ -21,6 +21,7 @@ al lado equivocado**. Ninguno se detectó con un objeto en rojo — todos daban 
 | [H11](#h11) | El claim `sub` no identifica a nadie | seguridad |
 | [H12](#h12) | El destino real confirma que el Host viaja sin reescribir | diseño |
 | [H13](#h13) | La prueba negativa de firma alterada no alteraba nada | validación |
+| [H14](#h14) | Falta un certificado y el error aparece en la AuthPolicy | Gateway API |
 
 ---
 
@@ -254,3 +255,43 @@ Durante un rato pareció un agujero de seguridad del destino. El agujero estaba 
 **Consecuencia:** la mutación va en el medio de la firma, donde siempre cambia un byte real.
 Vale como recordatorio: **una prueba negativa que no falla puede estar mal construida**, y eso es
 más probable que haber encontrado un bug de seguridad.
+
+---
+
+<a id="h14"></a>
+## H14. Falta un certificado y el error aparece en la AuthPolicy — 2026-08-05
+
+Primer montaje del destino OCP en `paas-dev1-lowmz`. La `AuthPolicy` quedó así:
+
+```console
+$ oc -n echoserver get authpolicy server2-ingress-jwt -o jsonpath='{...Accepted...}{" "}{...Enforced...}'
+True False
+$ oc -n echoserver get authpolicy server2-ingress-jwt -o jsonpath='{...Enforced...message}'
+AuthPolicy is not in the path to any existing routes
+```
+
+El mensaje no nombra ningún objeto, así que el primer reflejo fue ir al JWKS —lo único que la
+policy referencia por URL— y estaba impecable: `kid` correcto, RSA/RS256, los dos pods del server
+Running.
+
+La pista real estaba en el `HTTPRoute`, y **por ausencia**:
+
+```console
+$ oc -n echoserver get httproute server2 -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+kuadrant.io/AuthPolicyAffected=True(Accepted)
+```
+
+Esa condición la escribe Kuadrant. Faltaban `Accepted` y `ResolvedRefs`, que escribe el controller
+de Gateway API: el `HTTPRoute` **nunca había sido adoptado por ningún Gateway**. Y no lo había sido
+porque el listener del Gateway no tenía su certificado — el Secret del wildcard no se había creado
+todavía, y un listener con `ResolvedRefs=False (InvalidCertificateRef)` no admite routes.
+
+La cadena es una escalera —Secret → listener → Gateway → HTTPRoute → AuthPolicy— y **el error se
+reporta en el escalón más alto, tres niveles por encima de la causa**. Cada objeto intermedio es
+coherente con lo que ve: Kuadrant tiene razón en decir que no hay route en el camino.
+
+**Consecuencia:** el diagnóstico se recorre **de abajo hacia arriba**, parando en el primer escalón
+roto, que es lo que hace [`destino-ocp/27-reparar.sh`](destino-ocp/27-reparar.sh). Y el chequeo que
+decide en un solo comando: si el status del `HTTPRoute` **sólo** trae condiciones con prefijo
+`kuadrant.io/`, el problema no es de Kuadrant sino del Gateway. Corolario operativo: el Secret del
+certificado es un gate previo a aplicar el Gateway, no un paso más de la lista.

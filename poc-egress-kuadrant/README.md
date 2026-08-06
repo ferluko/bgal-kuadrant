@@ -937,6 +937,7 @@ destino-ocp/                                   DESTINO EN OTRO OPENSHIFT (paas-d
   24-jwks-static.yaml                          JWKS pineado, copiado del origen
   25-authpolicy-jwt.yaml                       validación del wristband, claims sin cambios
   26-serviceentry-origen.yaml                  ORIGEN: endpoint a la VIP, hasta mover el CNAME
+  27-reparar.sh                                diagnóstico en cadena, de abajo hacia arriba
   preflight.sh                                 gates previos (L3, RHCL, cert, skew de reloj)
 ```
 
