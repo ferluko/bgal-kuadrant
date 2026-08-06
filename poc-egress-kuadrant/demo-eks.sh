@@ -56,6 +56,19 @@ espera(){ (( PAUSAS )) && { printf '\n   %s· enter para seguir ·%s' "$D" "$Z";
 eq() { [[ "$2" == "$3" ]] && bien "$1" "$2" || mal "$1" "$2"; }
 
 req()     { curl -s --max-time 15 -H "Host: $HOSTAPP1" "$@" "http://$ING/"; }
+
+# Devuelve el JSON del primer request que dé 200. Si ninguno lo da, devuelve el último igual.
+# Sin esto, un 503 transitorio en el primer request deja TOK vacío y todo lo que sigue se
+# desmorona con tracebacks — inaceptable con público delante.
+req_ok() {
+  local i j=""
+  for i in 1 2 3 4 5; do
+    j=$(req)
+    [[ "$(f "$j" '.upstream.status')" == "200" ]] && { printf '%s' "$j"; return 0; }
+    sleep 1
+  done
+  printf '%s' "$j"; return 1
+}
 f()       { printf '%s' "${1:-}" | jq -r "${2} // \"null\"" 2>/dev/null || echo null; }
 
 # Petición TLS directa al destino real, validando la cadena. $1 = token ("" = sin token).
@@ -99,11 +112,15 @@ espera
 acto "1 · El consumidor no sabe nada" \
      "Llama a un nombre de Service. Nunca supo que el servicio se mudó."
 
-J=$(req)
+J=$(req_ok) || true
 dato "lo que pide el consumidor:" "$(f "$J" '.upstream.url')"
 dato "quién le respondió:"        "$(f "$J" '.upstream.body.environment.HOSTNAME')"
 dato "cuánto tardó:"              "$(f "$J" '.upstream.latencyMs') ms"
 eq  "responde correctamente" "$(f "$J" '.upstream.status')" "200"
+if [[ "$(f "$J" '.upstream.status')" != "200" ]]; then
+  nota "error del salto: $(f "$J" '.upstream.error')"
+  nota "Los actos 3 y 4 necesitan un token; sin un request exitoso se omiten."
+fi
 nota "La URL es la de siempre: server2.echoserver.svc.cluster.local:8080"
 espera
 
@@ -153,6 +170,10 @@ paso "(a) Un request sin credencial"
 eq "  el destino lo rechaza" "$(directo "")" "401"
 nota "Nadie puede consumir el servicio sin pasar por la plataforma."
 
+if [[ "$TOK" == "null" || -z "$TOK" || "$TOK" != *.*.* ]]; then
+  omit "(b) (c) (d) — pruebas que necesitan un token real" "no se obtuvo ninguno"
+  nota "Reintentá cuando el camino esté sano; el acto 1 dice por qué falló."
+else
 paso "(b) Una credencial manipulada"
 ALT=$(python3 -c "
 t='$TOK'.split('.'); s=t[2]
@@ -173,6 +194,7 @@ nota "Es la diferencia entre «no sé quién sos» y «sé quién sos y no está
 
 paso "(✓) Y la credencial correcta"
 eq "  el destino responde" "$(directo "$TOK")" "200"
+fi
 dato "procedencia que propagó:" "$(jq -r '.request.headers["x-forwarded-src-cluster"] // "—"' /tmp/demo-resp.json 2>/dev/null)"
 POD_EKS=$(jq -r '.environment.HOSTNAME // ""' /tmp/demo-resp.json 2>/dev/null)
 espera
@@ -186,21 +208,34 @@ acto "5 · Cuánto cuesta cruzar a la nube" \
 # backend al azar: etiquetar por variante da valores cruzados. El pod de EKS lo sabemos del
 # acto 4, que le habló directo.
 paso "20 requests reales, agrupados por quién respondió"
-for _ in $(seq 1 20); do req | jq -r '"\(.upstream.body.environment.HOSTNAME // "?") \(.upstream.latencyMs // 0)"'; done > /tmp/demo-lat.txt
+# `.upstream.body` es un STRING cuando el salto falla. Indexarlo como objeto hace que jq
+# escupa un error por request y el fallo real queda escondido detrás del ruido.
+for _ in $(seq 1 20); do
+  req | jq -r 'if (.upstream.body|type)=="object"
+               then "\(.upstream.body.environment.HOSTNAME // "?") \(.upstream.latencyMs // 0)"
+               else "FALLO \(.upstream.status // "sin-respuesta")" end' 2>/dev/null || echo "FALLO parseo"
+done > /tmp/demo-lat.txt
 python3 - "${POD_EKS:-}" <<'PY'
 import sys, collections
 eks = sys.argv[1]
-g = collections.defaultdict(list)
+g = collections.defaultdict(list); fallos = collections.Counter()
 for l in open("/tmp/demo-lat.txt"):
     p = l.split()
-    if len(p) == 2 and p[0] != "?":
+    if len(p) == 2 and p[0] == "FALLO":
+        fallos[p[1]] += 1
+    elif len(p) == 2 and p[0] != "?":
         g[p[0]].append(float(p[1]))
 for pod, v in sorted(g.items(), key=lambda kv: sum(kv[1])/len(kv[1])):
     v.sort()
     donde = "en EKS  (us-east-1)" if pod == eks else "local   (paas-arqlab)"
     print("       %-22s %-34s %6.1f ms" % (donde, pod[:34], v[len(v)//2]))
-if len(g) == 1:
+if len(g) == 1 and not fallos:
     print("       (un solo backend: el reparto está al 100 % de un lado)")
+if fallos:
+    tot = sum(fallos.values())
+    print("\n       %d de 20 requests FALLARON: %s" %
+          (tot, ", ".join("%s x %s" % (v, k) for k, v in fallos.most_common())))
+    print("       El camino remoto no esta sano; revisar antes de presentar.")
 PY
 nota "De la diferencia, ~11 ms son el gateway y la firma. El resto es el viaje a us-east-1."
 nota "Medición completa y sostenida:  ./medir-latencia.sh 2000 --par 40"
