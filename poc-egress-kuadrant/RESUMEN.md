@@ -65,12 +65,13 @@ Y desde el 2026-08-06, **medido contra el cluster EKS real**, no contra el stand
 
 | | |
 |---|---|
-| Latencia mediana al destino | **178 ms** en el gateway · 184 ms visto por el cliente |
+| Latencia mediana al destino | **181 ms** |
 | De eso, costo del patrón | **~11 ms** — el resto es RTT a `us-east-1` |
-| p90 / p99 | 238 / 420 ms |
-| Throughput sostenido | **266 req/s**, cero errores |
-| Reuso de conexión | 70 requests por conexión |
-| Backend local bajo carga | p50 11,6 ms — **no se degrada** |
+| p90 / p99 | 242-263 / 342-380 ms |
+| Throughput sostenido | **262-269 req/s**, cero errores |
+| Reuso de conexión | 49 conexiones para 2136 requests, `cx_connect_fail: 0` |
+| Backend local bajo carga | p50 10,7 ms — **no se degrada** |
+| TLS | cadena validada contra la CA del banco, **sin costo medible** |
 
 Eso exigió un `connectionPool` que no estaba en el diseño: sin él aparecen 503 por fallo de
 conexión y el p99 se va a 3 RTT ([H14](HALLAZGOS.md#h14)). **Es el hallazgo que el simulador no
@@ -92,11 +93,6 @@ suelto no hace llamadas salientes, así que el salto a migrar no existía. Ver
 
 Verde acá significa *"la mecánica funciona"*. No significa:
 
-- **La validación TLS de la cadena.** Las mediciones del 2026-08-06 se hicieron con
-  `insecureSkipVerify`: el tráfico va cifrado pero el origen no verifica contra quién. La cadena
-  de la CA NoProd del banco ya está disponible; falta cargarla en el Secret `destino-ca` y volver
-  a medir para confirmar que no cambia nada (no debería: verificar la cadena es CPU, y Envoy no
-  consulta CRL ni OCSP por defecto).
 - **El skew de reloj entre clusters.** Los tokens frescos validan, así que el desfasaje está
   dentro de los 300 s de vida — pero no se ejercitó un token cerca de su vencimiento contra el
   destino real. Es la prueba negativa (c) y sigue pendiente.

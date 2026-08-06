@@ -22,6 +22,7 @@ al lado equivocado**. Ninguno se detectó con un objeto en rojo — todos daban 
 | [H12](#h12) | El destino real confirma que el Host viaja sin reescribir | diseño |
 | [H13](#h13) | La prueba negativa de firma alterada no alteraba nada | validación |
 | [H14](#h14) | **El pool de conexiones no estaba en el diseño, y sin él el egreso no aguanta concurrencia** | capacidad |
+| [H15](#h15) | El Secret de CA del simulador sobrevive y tumba el TLS al destino real | despliegue |
 | [H14](#h14) | Falta un certificado y el error aparece en la AuthPolicy | Gateway API |
 
 ---
@@ -62,6 +63,39 @@ clusters montados y la red abierta.
 
 **Para el ADR:** la Opción B (Kuadrant validando en el destino) es viable, pero **no con la
 configuración obvia**. Conviene que la excepción del ADR lo diga.
+
+---
+
+<a id="h15"></a>
+## H15. El Secret de CA del simulador sobrevive al simulador — 2026-08-06
+
+`sim-destino/00-gen-certs.sh` crea el Secret **`destino-ca` en el namespace del ORIGEN**, porque
+ahí es donde corren los pods del gateway y donde Istio lee el material de CA. Consecuencia: **no
+se va con el simulador**. Queda apuntando a una CA de laboratorio que ya no corresponde.
+
+Al activar `credentialName: destino-ca` contra el destino real, el resultado fue **100 % de
+fallos**:
+
+```
+cx_total: 234    cx_connect_fail: 234    rq_total: 0
+```
+
+Ni un solo request llegó. Y el síntoma que ve el cliente es un **503**, indistinguible de un
+problema de red o de un backend caído. Los contadores son lo único que lo separa: con
+`cx_connect_fail` igual a `cx_total` y `rq_total` en cero, el problema es del handshake y no del
+camino.
+
+**Dos cosas que amplifican la trampa:**
+
+- El `DestinationRule` estaba perfecto y `oc apply` decía `unchanged`. **Un objeto correcto que
+  apunta a un Secret equivocado no se detecta mirando el objeto.**
+- El destino presenta **sólo la hoja**, sin su intermedia. Así que no alcanza con cargar la raíz:
+  hacen falta intermedia **y** raíz, o la validación falla igual y con el mismo síntoma.
+
+**Consecuencia:** verificar la cadena con `openssl s_client -CAfile` **antes** de cargarla
+convierte un 503 opaco en un `Verify return code` que dice exactamente qué falta. Una vez
+corregido, las mediciones dieron idénticas a las hechas sin validar — 269 vs 266 req/s, p50 181
+vs 184 ms — confirmando que verificar la cadena no tiene costo medible.
 
 ---
 
@@ -300,6 +334,39 @@ Durante un rato pareció un agujero de seguridad del destino. El agujero estaba 
 **Consecuencia:** la mutación va en el medio de la firma, donde siempre cambia un byte real.
 Vale como recordatorio: **una prueba negativa que no falla puede estar mal construida**, y eso es
 más probable que haber encontrado un bug de seguridad.
+
+---
+
+<a id="h15"></a>
+## H15. El Secret de CA del simulador sobrevive al simulador — 2026-08-06
+
+`sim-destino/00-gen-certs.sh` crea el Secret **`destino-ca` en el namespace del ORIGEN**, porque
+ahí es donde corren los pods del gateway y donde Istio lee el material de CA. Consecuencia: **no
+se va con el simulador**. Queda apuntando a una CA de laboratorio que ya no corresponde.
+
+Al activar `credentialName: destino-ca` contra el destino real, el resultado fue **100 % de
+fallos**:
+
+```
+cx_total: 234    cx_connect_fail: 234    rq_total: 0
+```
+
+Ni un solo request llegó. Y el síntoma que ve el cliente es un **503**, indistinguible de un
+problema de red o de un backend caído. Los contadores son lo único que lo separa: con
+`cx_connect_fail` igual a `cx_total` y `rq_total` en cero, el problema es del handshake y no del
+camino.
+
+**Dos cosas que amplifican la trampa:**
+
+- El `DestinationRule` estaba perfecto y `oc apply` decía `unchanged`. **Un objeto correcto que
+  apunta a un Secret equivocado no se detecta mirando el objeto.**
+- El destino presenta **sólo la hoja**, sin su intermedia. Así que no alcanza con cargar la raíz:
+  hacen falta intermedia **y** raíz, o la validación falla igual y con el mismo síntoma.
+
+**Consecuencia:** verificar la cadena con `openssl s_client -CAfile` **antes** de cargarla
+convierte un 503 opaco en un `Verify return code` que dice exactamente qué falta. Una vez
+corregido, las mediciones dieron idénticas a las hechas sin validar — 269 vs 266 req/s, p50 181
+vs 184 ms — confirmando que verificar la cadena no tiene costo medible.
 
 ---
 
