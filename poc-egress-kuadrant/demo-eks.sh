@@ -36,12 +36,14 @@ else V=; R=; A=; C=; B=; D=; Z=; fi
 
 OK=0; MAL=0; OMIT=0; FALLIDOS=()
 
+# Sin recuadro a propósito: un borde derecho calculado a mano se corta en cuanto el ancho de
+# la terminal no es el previsto. Una regla sin cerrar no se puede romper.
+REGLA=$(printf '─%.0s' $(seq 1 74))
 acto() {
-  printf '\n%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n' "$C" "$Z"
-  printf '%s║%s  %-74s%s║%s\n' "$C" "$Z$B" "$1" "$C" "$Z"
-  printf '%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n' "$C" "$Z"
-  [[ -n "${2-}" ]] && printf '   %s%s%s\n' "$D" "$2" "$Z"
-  echo
+  printf '\n%s%s%s\n' "$C" "$REGLA" "$Z"
+  printf '  %s%s%s\n' "$B" "$1" "$Z"
+  [[ -n "${2-}" ]] && printf '  %s%s%s\n' "$D" "$2" "$Z"
+  printf '%s%s%s\n\n' "$C" "$REGLA" "$Z"
 }
 paso()  { printf '   %s▸%s %s\n' "$C" "$Z" "$1"; }
 dato()  { printf '       %-30s %s%s%s\n' "$1" "$B" "$2" "$Z"; }
@@ -60,8 +62,10 @@ f()       { printf '%s' "${1:-}" | jq -r "${2} // \"null\"" 2>/dev/null || echo 
 directo() {
   local tok="${1-}" extra=()
   [[ -n "$tok" ]] && extra=(-H "x-egress-token: $tok")
+  # `${extra[@]+...}`: con `set -u`, bash 4 considera "unbound" un array vacío expandido
+  # como "${extra[@]}". Esta forma lo omite en vez de abortar.
   curl -s -o /tmp/demo-resp.json -w '%{http_code}' --max-time 15 --cacert "$CA" \
-       -H "Host: $HOSTINT" "${extra[@]}" "https://$DEST/" 2>/dev/null || echo "ERR"
+       -H "Host: $HOSTINT" ${extra[@]+"${extra[@]}"} "https://$DEST/" 2>/dev/null || echo "ERR"
 }
 
 # Forja un JWT con la clave privada REAL del origen, partiendo de los claims de un token
@@ -92,7 +96,7 @@ printf '   %sorigen: paas-arqlab (on-prem)   ·   destino: EKS (us-east-1)%s\n' 
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
-acto "ACTO 1 · El consumidor no sabe nada" \
+acto "1 · El consumidor no sabe nada" \
      "Llama a un nombre de Service. Nunca supo que el servicio se mudó."
 
 J=$(req)
@@ -104,7 +108,7 @@ nota "La URL es la de siempre: server2.echoserver.svc.cluster.local:8080"
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
-acto "ACTO 2 · Pero el tráfico ya no va donde iba" \
+acto "2 · Pero el tráfico ya no va donde iba" \
      "El Service no se recreó: se le cambió el selector. Misma IP, mismo nombre."
 
 CIP=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
@@ -121,7 +125,7 @@ nota "Esa IP es la prueba: antes era la del pod consumidor. La app no cambió un
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
-acto "ACTO 3 · Y el gateway le pone una credencial" \
+acto "3 · Y el gateway le pone una credencial" \
      "Un JWT de 300 segundos, firmado con una clave que sólo existe en este cluster."
 
 TOK=$(f "$J" '.upstream.body.request.headers["x-egress-token"]')
@@ -142,52 +146,69 @@ nota "La clave privada nunca sale del origen. Al destino sólo se le dio la púb
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
-acto "ACTO 4 · ¿Y si alguien intenta saltearse todo esto?" \
+acto "4 · ¿Y si alguien intenta saltearse todo esto?" \
      "Cuatro intentos contra el cluster destino real, desde afuera del camino."
 
 paso "(a) Un request sin credencial"
-eq "  el destino lo rechaza  →  401" "$(directo "")" "401"
+eq "  el destino lo rechaza" "$(directo "")" "401"
 nota "Nadie puede consumir el servicio sin pasar por la plataforma."
 
 paso "(b) Una credencial manipulada"
 ALT=$(python3 -c "
 t='$TOK'.split('.'); s=t[2]
 print('%s.%s.%s' % (t[0],t[1], s[:10]+('B' if s[10]=='A' else 'A')+s[11:]))")
-eq "  el destino detecta la firma rota  →  401" "$(directo "$ALT")" "401"
+eq "  el destino detecta la firma rota" "$(directo "$ALT")" "401"
 
 paso "(c) Una credencial vencida — firmada por nosotros, con exp en el pasado"
 VIEJO=$(forjar '{"exp": 1700000000, "iat": 1699999700}')
-eq "  el destino mira la expiración  →  401" "$(directo "$VIEJO")" "401"
+eq "  el destino mira la expiración" "$(directo "$VIEJO")" "401"
 nota "Firma legítima. La rechaza igual: una credencial robada sirve 5 minutos, no para siempre."
 
 paso "(d) Una credencial válida, pero emitida para OTRO destino"
 OTRO=$(forjar '{"aud": "otro-servicio.paas-demo.bancogalicia.com.ar"}')
 COD=$(directo "$OTRO")
-eq "  el destino la autentica pero NO la autoriza  →  403" "$COD" "403"
+eq "  la autentica pero NO la autoriza" "$COD" "403"
 nota "403 y no 401: la firma es nuestra y la reconoce. Lo que rechaza son los claims."
 nota "Es la diferencia entre «no sé quién sos» y «sé quién sos y no estás habilitado»."
 
 paso "(✓) Y la credencial correcta"
-eq "  el destino responde  →  200" "$(directo "$TOK")" "200"
-jq -r '"       \("procedencia que propagó:" ):" + (.request.headers["x-forwarded-src-cluster"] // "—")' /tmp/demo-resp.json 2>/dev/null \
-  | sed 's/^/  /' || true
+eq "  el destino responde" "$(directo "$TOK")" "200"
+dato "procedencia que propagó:" "$(jq -r '.request.headers["x-forwarded-src-cluster"] // "—"' /tmp/demo-resp.json 2>/dev/null)"
+POD_EKS=$(jq -r '.environment.HOSTNAME // ""' /tmp/demo-resp.json 2>/dev/null)
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
-acto "ACTO 5 · Cuánto cuesta cruzar a la nube" \
+acto "5 · Cuánto cuesta cruzar a la nube" \
      "El costo del patrón, separado del costo de la geografía."
 
-L=$(req | jq -r '.upstream.latencyMs')
-R=$(req -H 'x-canary: true' | jq -r '.upstream.latencyMs')
-dato "al backend local:"     "${L} ms"
-dato "al backend en EKS:"    "${R} ms"
+# Se etiqueta por el POD que efectivamente respondió, nunca por la variante del request.
+# Si la route está en pesos, el header `x-canary` no selecciona nada y cada request cae en un
+# backend al azar: etiquetar por variante da valores cruzados. El pod de EKS lo sabemos del
+# acto 4, que le habló directo.
+paso "20 requests reales, agrupados por quién respondió"
+for _ in $(seq 1 20); do req | jq -r '"\(.upstream.body.environment.HOSTNAME // "?") \(.upstream.latencyMs // 0)"'; done > /tmp/demo-lat.txt
+python3 - "${POD_EKS:-}" <<'PY'
+import sys, collections
+eks = sys.argv[1]
+g = collections.defaultdict(list)
+for l in open("/tmp/demo-lat.txt"):
+    p = l.split()
+    if len(p) == 2 and p[0] != "?":
+        g[p[0]].append(float(p[1]))
+for pod, v in sorted(g.items(), key=lambda kv: sum(kv[1])/len(kv[1])):
+    v.sort()
+    donde = "en EKS  (us-east-1)" if pod == eks else "local   (paas-arqlab)"
+    print("       %-22s %-34s %6.1f ms" % (donde, pod[:34], v[len(v)//2]))
+if len(g) == 1:
+    print("       (un solo backend: el reparto está al 100 % de un lado)")
+PY
 nota "De la diferencia, ~11 ms son el gateway y la firma. El resto es el viaje a us-east-1."
 nota "Medición completa y sostenida:  ./medir-latencia.sh 2000 --par 40"
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
 if (( MIGRACION )); then
-  acto "ACTO 6 · La migración, de a poco y reversible" \
+  acto "6 · La migración, de a poco y reversible" \
        "El reparto se controla desde el HTTPRoute. El Service no se vuelve a tocar."
   PREV="$DIR/origen/08-rollout/fase0a-solo-local.yaml"
   restaurar() { printf '\n   %srestaurando el estado previo…%s\n' "$D" "$Z"; oc apply -n "$NS" -f "$PREV" >/dev/null 2>&1 && echo "   ok"; }
@@ -210,9 +231,9 @@ if (( MIGRACION )); then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-printf '\n%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n' "$C" "$Z"
-printf '%s║%s  %-74s%s║%s\n' "$C" "$Z$B" "RESULTADO" "$C" "$Z"
-printf '%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n' "$C" "$Z"
+printf '\n%s%s%s\n' "$C" "$REGLA" "$Z"
+printf '  %sRESULTADO%s\n' "$B" "$Z"
+printf '%s%s%s\n' "$C" "$REGLA" "$Z"
 printf '\n   %s%d verificaciones en verde%s' "$V" "$OK" "$Z"
 (( MAL ))  && printf '   ·   %s%d en rojo%s' "$R" "$MAL" "$Z"
 (( OMIT )) && printf '   ·   %s%d omitidas%s' "$A" "$OMIT" "$Z"
