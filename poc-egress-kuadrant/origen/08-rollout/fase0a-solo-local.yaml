@@ -45,9 +45,11 @@ spec:
     - name: egress-gw
       sectionName: mesh-internal
   hostnames:
-    # Tiene que INTERSECAR el `hostname` del listener (01-gateway-egress.yaml). Si no interseca,
-    # la route queda Accepted=False/NoMatchingListenerHostname y el síntoma en el cliente es un
-    # 404: el Gateway sigue Programmed y no hay ninguna alarma.
+    # El listener no restringe hostname (01-gateway-egress.yaml); declarar todas las
+    # autoridades que pueden enviar los clientes permite conservar la URL original.
+    - "server2"
+    - "server2.echoserver"
+    - "server2.echoserver.svc"
     - "server2.echoserver.svc.cluster.local"
   rules:
     - name: default

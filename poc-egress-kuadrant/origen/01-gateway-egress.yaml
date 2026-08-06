@@ -33,8 +33,9 @@ spec:
     - name: mesh-internal
       protocol: HTTP
       port: 8080
-      # El Host que envía el cliente sin modificar su URL de consumo.
-      hostname: "server2.echoserver.svc.cluster.local"
+      # Sin hostname: las HTTPRoutes definen las variantes admitidas del Host
+      # (FQDN y formas abreviadas como `server2`). Restringir este listener al
+      # FQDN impediría atender esas variantes, aunque figuren en la route.
       allowedRoutes:
         namespaces:
           from: Same
