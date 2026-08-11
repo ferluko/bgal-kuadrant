@@ -38,21 +38,21 @@ oc -n kuadrant-system get secret egress-echoserver-1 -o jsonpath='{.data}{"\n"}'
 
 ```bash
 oc apply -f 01-gateway-smoke.yaml
-oc -n echoserver get gateway smoke-gw \
+oc -n poc-egress-kuadrant get gateway smoke-gw \
   -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}{"\n"}'
 
 oc apply -f 02-httproute-smoke.yaml
-oc -n echoserver get httproute smoke-wristband \
+oc -n poc-egress-kuadrant get httproute smoke-wristband \
   -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
 
-oc -n echoserver run smoke-curl --rm -it --restart=Never \
+oc -n poc-egress-kuadrant run smoke-curl --rm -it --restart=Never \
   --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
   curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: smoke.egress.local' \
-  http://smoke-gw-openshift-default.echoserver.svc.cluster.local:8080/
+  http://smoke-gw-openshift-default.poc-egress-kuadrant.svc.cluster.local:8080/
 ```
 
 **Esperado: 200.** Si da 404, el route no enganchó (revisar `attachedRoutes` en el status del
-Gateway). Si da 503, enganchó pero `server2` no tiene endpoints listos.
+Gateway). Si da 503, enganchó pero `backend` no tiene endpoints listos.
 
 ### LoadBalancer pendiente
 
@@ -63,7 +63,7 @@ controller genera un Service `LoadBalancer` que en este cluster queda así:
 NAME                         TYPE           CLUSTER-IP       EXTERNAL-IP   PORT(S)
 smoke-gw-openshift-default   LoadBalancer   172.30.150.100   <pending>     15021:31154/TCP,8080:32118/TCP
 
-Assigned to service(s) smoke-gw-openshift-default.echoserver.svc.cluster.local:8080,
+Assigned to service(s) smoke-gw-openshift-default.poc-egress-kuadrant.svc.cluster.local:8080,
 but failed to assign to all requested addresses: address pending for hostname ...
 ```
 
@@ -78,9 +78,9 @@ que alcance ese nodePort obtendría un JWT firmado. La `NetworkPolicy` lo tapa, 
 no debería existir. Por eso `origen/01` lleva la annotation.
 
 ```bash
-oc -n echoserver patch gateway smoke-gw --type merge \
+oc -n poc-egress-kuadrant patch gateway smoke-gw --type merge \
   -p '{"metadata":{"annotations":{"networking.istio.io/service-type":"ClusterIP"}}}'
-oc -n echoserver get svc -l gateway.networking.k8s.io/gateway-name=smoke-gw   # TYPE=ClusterIP, sin nodePorts
+oc -n poc-egress-kuadrant get svc -l gateway.networking.k8s.io/gateway-name=smoke-gw   # TYPE=ClusterIP, sin nodePorts
 ```
 
 Si el Service sigue saliendo `LoadBalancer`, este controller no toma la annotation: probar la
@@ -90,7 +90,7 @@ variante con `infrastructure.parametersRef` comentada en `01-gateway-smoke.yaml`
 
 ```bash
 oc apply -f 03-authpolicy-denyall.yaml
-oc -n echoserver get authpolicy smoke-denyall \
+oc -n poc-egress-kuadrant get authpolicy smoke-denyall \
   -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 
 # mismo curl que el paso 1
@@ -104,20 +104,20 @@ el ext_authz de Kuadrant. Es un hallazgo de plataforma que hay que escalar antes
 arregla desde esta PoC.
 
 ```bash
-oc -n echoserver delete authpolicy smoke-denyall
+oc -n poc-egress-kuadrant delete authpolicy smoke-denyall
 ```
 
 ## Paso 3 — el wristband
 
 ```bash
 oc apply -f 04-authpolicy-wristband.yaml
-oc -n echoserver get authpolicy smoke-wristband \
+oc -n poc-egress-kuadrant get authpolicy smoke-wristband \
   -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 
-oc -n echoserver run smoke-curl --rm -it --restart=Never \
+oc -n poc-egress-kuadrant run smoke-curl --rm -it --restart=Never \
   --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
   curl -sS -H 'Host: smoke.egress.local' \
-  http://smoke-gw-openshift-default.echoserver.svc.cluster.local:8080/
+  http://smoke-gw-openshift-default.poc-egress-kuadrant.svc.cluster.local:8080/
 ```
 
 **Esperado: 200 y, en el cuerpo reflejado por el echo server, un header `x-egress-token` con un
@@ -128,7 +128,7 @@ JWT** (tres segmentos separados por punto, empezando en `eyJ`).
 Primero mirar si el `AuthPolicy` llegó a sincronizar:
 
 ```bash
-oc -n echoserver get authpolicy smoke-wristband \
+oc -n poc-egress-kuadrant get authpolicy smoke-wristband \
   -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 oc -n kuadrant-system logs deploy/authorino --tail=100 | grep -Ei 'Reconciler error|wristband'
 ```
@@ -176,9 +176,9 @@ destino rechazaría todos los tokens y el síntoma aparecería recién con los d
 ## Limpieza
 
 ```bash
-oc -n echoserver delete authpolicy smoke-wristband
-oc -n echoserver delete httproute smoke-wristband
-oc -n echoserver delete gateway smoke-gw
+oc -n poc-egress-kuadrant delete authpolicy smoke-wristband
+oc -n poc-egress-kuadrant delete httproute smoke-wristband
+oc -n poc-egress-kuadrant delete gateway smoke-gw
 ```
 
 El Secret de firma se conserva: es el mismo que usa `origen/05`.

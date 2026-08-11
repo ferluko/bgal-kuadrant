@@ -11,13 +11,13 @@
 apiVersion: kuadrant.io/v1
 kind: RateLimitPolicy
 metadata:
-  name: server2-rlp
+  name: backend-rlp
   namespace: echoserver
 spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: server2
+    name: backend
   limits:
     "por-origen":
       rates:

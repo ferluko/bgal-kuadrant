@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mide la latencia del salto server -> server2 desde el bastión, agrupando por el pod que
+# Mide la latencia del salto bff -> backend desde el bastión, agrupando por el pod que
 # realmente atendió. Sirve para comparar antes y después de mover tráfico.
 #
 #   ./medir-latencia.sh              # 100 requests EN SERIE
@@ -30,7 +30,7 @@ N="${1:-100}"
 MODO="${2:-}"
 PAR="${3:-1}"
 URL="${URL:-http://10.254.28.68}"
-HOST="${HOST:-app1.paas-demo.bancogalicia.com.ar}"
+HOST="${HOST:-bff.paas-demo.bancogalicia.com.ar}"
 
 command -v jq >/dev/null || { echo "falta jq"; exit 2; }
 

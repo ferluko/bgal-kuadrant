@@ -14,8 +14,8 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: egress-server2
-  namespace: echoserver
+  name: egress-backend
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/fase: "2-pesos"
     poc.galicia.io/reparto: "95/5"
@@ -24,10 +24,10 @@ spec:
     - name: egress-gw
       sectionName: mesh-internal
   hostnames:
-    - "server2"
-    - "server2.echoserver"
-    - "server2.echoserver.svc"
-    - "server2.echoserver.svc.cluster.local"
+    - "backend"
+    - "backend.poc-egress-kuadrant"
+    - "backend.poc-egress-kuadrant.svc"
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
   rules:
     - name: default
       matches:
@@ -35,7 +35,7 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: server2-local
+        - name: backend-local
           port: 8080
           weight: 95
         - group: networking.istio.io
@@ -48,17 +48,17 @@ spec:
 # el p99 medidos en el cliente no empeoran respecto del escalón anterior.
 #
 # ROLLBACK INSTANTÁNEO (sin rollout de pods, sin tocar el Service):
-#   oc -n echoserver patch httproute egress-server2 --type json -p \
+#   oc -n poc-egress-kuadrant patch httproute egress-backend --type json -p \
 #     '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":100},
 #       {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":0}]'
 #
 # Precondición que habilita esta fase (verificar ANTES, ver README §6bis):
-#   durante el reparto hay dos instancias vivas de server2. Ambas tienen que
+#   durante el reparto hay dos instancias vivas de backend. Ambas tienen que
 #   llegar a los mismos backing stores y tolerar escrituras concurrentes, y
-#   server2 no puede tener estado en memoria: el reparto es por request, no
+#   backend no puede tener estado en memoria: el reparto es por request, no
 #   pegajoso. Si algo de eso no se cumple, saltear la fase 2 y migrar con ventana.
 #
 # Verificar en cluster que Istio acepte `weight` sobre un backendRef kind: Hostname:
-#   oc -n echoserver get httproute egress-server2 \
+#   oc -n poc-egress-kuadrant get httproute egress-backend \
 #     -o jsonpath='{.status.parents[*].conditions[?(@.type=="ResolvedRefs")].message}{"\n"}'
 # Si no lo soporta, el fallback es un VirtualService nativo con weight.

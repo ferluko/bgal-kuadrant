@@ -1,17 +1,17 @@
 # Cluster ORIGEN — control de quién puede pedirle un JWT al gateway de egreso.
 #
 # Como la autenticación de entrada al gateway es anonymous, la NetworkPolicy es el
-# control efectivo: sólo los pods de `server` pueden alcanzar el listener 8080 del
+# control efectivo: sólo los pods de `bff` pueden alcanzar el listener 8080 del
 # gateway de egreso. Sin esto, cualquier pod del ns podría obtener un token firmado.
 #
 # Aplica tal cual con la intercepción por selector (09), porque los pods del gateway
 # viven en `echoserver`. Con el fallback ExternalName y el data plane en otro
-# namespace, sólo queda vigente la segunda policy (egress desde `server`).
+# namespace, sólo queda vigente la segunda policy (egress desde `bff`).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-server-to-egress-gw
-  namespace: echoserver
+  name: allow-bff-to-egress-gw
+  namespace: poc-egress-kuadrant
 spec:
   podSelector:
     matchLabels:
@@ -22,22 +22,22 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: server        # <<< AJUSTAR a las labels reales del pod server
+              app: bff        # <<< AJUSTAR a las labels reales del pod bff
       ports:
         - protocol: TCP
           port: 8080
 ---
-# Egreso del pod server: sólo hacia el gateway (post-DNAT del ClusterIP de server2)
-# y DNS. Tras el cutover el pod `server` ya no habla directo con los pods de server2.
+# Egreso del pod bff: sólo hacia el gateway (post-DNAT del ClusterIP de backend)
+# y DNS. Tras el cutover el pod `bff` ya no habla directo con los pods de backend.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: server-egress-only-to-gw
-  namespace: echoserver
+  name: bff-egress-only-to-gw
+  namespace: poc-egress-kuadrant
 spec:
   podSelector:
     matchLabels:
-      app: server                # <<< AJUSTAR
+      app: bff                # <<< AJUSTAR
   policyTypes:
     - Egress
   egress:
@@ -59,17 +59,17 @@ spec:
           port: 5353
 ---
 # Camino local del canary: durante las fases 0-3 el gateway devuelve parte del
-# tráfico a los pods de server2 vía el Service server2-local. Sin esta policy, un
+# tráfico a los pods de backend vía el Service backend-local. Sin esta policy, un
 # default-deny en el namespace corta el backend local del split.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-egress-gw-to-server2-local
-  namespace: echoserver
+  name: allow-egress-gw-to-backend-local
+  namespace: poc-egress-kuadrant
 spec:
   podSelector:
     matchLabels:
-      app: server2               # <<< AJUSTAR a las labels reales del pod server2
+      app: backend               # <<< AJUSTAR a las labels reales del pod backend
   policyTypes:
     - Ingress
   ingress:

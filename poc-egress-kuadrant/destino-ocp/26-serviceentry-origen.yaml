@@ -26,8 +26,8 @@
 apiVersion: networking.istio.io/v1
 kind: ServiceEntry
 metadata:
-  name: server2-destino
-  namespace: echoserver
+  name: backend-destino
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/modo: "destino OCP real, endpoint fijado a la ingress VIP — sin DNS"
     poc.galicia.io/pasar-a-definitivo: "mover el CNAME y aplicar origen/02 verbatim"
@@ -68,13 +68,13 @@ spec:
 # 1) El host quedó en el registry del proxy de egreso con el endpoint correcto. Es LA
 #    comprobación: si acá aparece 172.19.105.122, sigue resolviendo por DNS al NLB de EKS.
 #
-#   POD=$(oc -n echoserver get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
-#   oc -n echoserver exec $POD -c istio-proxy -- pilot-agent request GET clusters \
+#   POD=$(oc -n poc-egress-kuadrant get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
+#   oc -n poc-egress-kuadrant exec $POD -c istio-proxy -- pilot-agent request GET clusters \
 #     | grep -F app2.paas-demo | head -5
 #
 # 2) El HTTPRoute con el backendRef remoto resuelve:
 #
-#   oc -n echoserver get httproute egress-server2 \
+#   oc -n poc-egress-kuadrant get httproute egress-backend \
 #     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 #
 #   `ResolvedRefs=False` significa que el controller no acepta `backendRef kind: Hostname`.
@@ -82,12 +82,12 @@ spec:
 #
 # 3) Hace falta también el DestinationRule, que se aplica verbatim y es el que pone el SNI:
 #
-#   oc apply -n echoserver -f ../origen/04-destinationrule-tls.yaml
+#   oc apply -n poc-egress-kuadrant -f ../origen/04-destinationrule-tls.yaml
 #
 #    con el Secret `destino-ca` en el ns donde corren los pods del gateway de egreso,
 #    cargado con la CA que firmó el wildcard del destino:
 #
-#   oc -n echoserver create secret generic destino-ca \
+#   oc -n poc-egress-kuadrant create secret generic destino-ca \
 #     --from-file=ca.crt=ca-interna-galicia.pem --from-file=cacert=ca-interna-galicia.pem \
 #     --dry-run=client -o yaml | oc apply -f -
 #

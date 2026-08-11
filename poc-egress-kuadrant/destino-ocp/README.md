@@ -1,4 +1,4 @@
-# Destino OCP — `server2` en `paas-dev1-lowmz`, consumido desde `paas-arqlab`
+# Destino OCP — `backend` en `paas-dev1-lowmz`, consumido desde `paas-arqlab`
 
 Tercera variante del destino de la PoC, y la primera que es **un cluster real y distinto**:
 
@@ -8,8 +8,8 @@ Tercera variante del destino de la PoC, y la primera que es **un cluster real y 
 | **`destino-ocp/`** (este) | **`paas-dev1-lowmz`**, otro sitio | **RTT entre sitios, skew de reloj, router HAProxy, TLS contra un cluster ajeno** | el passthrough L4 de un NLB de AWS |
 | [`destino/`](../destino/) | EKS | el diseño objetivo completo | — (bloqueado: clave pública desincronizada, ver [`pedido-jwks-eks.md`](../pedido-jwks-eks.md)) |
 
-El objetivo es el mismo de siempre: `server` sigue consumiendo
-`http://server2.echoserver.svc.cluster.local:8080` sin enterarse de nada, y ese salto
+El objetivo es el mismo de siempre: `bff` sigue consumiendo
+`http://backend.poc-egress-kuadrant.svc.cluster.local:8080` sin enterarse de nada, y ese salto
 ahora termina en otro cluster de otro datacenter, autenticado con el mismo wristband y
 los **mismos claims, sin cambiar un solo valor**.
 
@@ -20,7 +20,7 @@ aplicar nada. El egreso **no reescribe el `Host`** (README de la PoC §4), así 
 request que sale del origen viaja con dos nombres distintos:
 
 ```
-Host: server2.echoserver.svc.cluster.local:8080     <- el del cliente original
+Host: backend.poc-egress-kuadrant.svc.cluster.local:8080     <- el del cliente original
 SNI:  app2.paas-demo.bancogalicia.com.ar            <- lo fija origen/04 (DestinationRule)
 ```
 
@@ -32,7 +32,7 @@ Y el router HAProxy elige el backend con criterios distintos según la terminaci
   passthrough del diseño con EKS: el origen valida el certificado del gateway, no el de
   un intermediario.
 - **`edge` / `reencrypt`** → termina TLS y elige por el header **`Host`**, que acá es
-  `server2.echoserver.svc.cluster.local:8080`. Ninguna Route declara ese host: **503 del
+  `backend.poc-egress-kuadrant.svc.cluster.local:8080`. Ninguna Route declara ese host: **503 del
   router**, con un síntoma que no señala a la causa. Y además el origen pasaría a validar
   el certificado del router.
 
@@ -49,19 +49,19 @@ El Gateway va ClusterIP y lo publica el router.
 ## 2. Arquitectura
 
 ```
-   cliente ──► F5 ──► gw-hostnet ──► server (BFF en cascada)
+   cliente ──► F5 ──► gw-hostnet ──► bff (BFF en cascada)
                                         │  ns echoserver
-CLUSTER ORIGEN — paas-arqlab (PGA)      │  GET http://server2.echoserver.svc.cluster.local:8080/
+CLUSTER ORIGEN — paas-arqlab (PGA)      │  GET http://backend.poc-egress-kuadrant.svc.cluster.local:8080/
                                         ▼
-                             Service server2 (selector -> pods del gateway de egreso)
+                             Service backend (selector -> pods del gateway de egreso)
                                         │
                               ┌─────────┴──────────┐  peso
-                              │ Gateway egress-gw  ├────────► server2-local (sin tocar)
+                              │ Gateway egress-gw  ├────────► backend-local (sin tocar)
                               │ AuthPolicy         │
                               │  wristband RS256   │  x-egress-token
                               └─────────┬──────────┘
                                         │  TLS origination (origen/04)
-                                        │  Host: server2.echoserver.svc...  SNI: app2.paas-demo...
+                                        │  Host: backend.poc-egress-kuadrant.svc...  SNI: app2.paas-demo...
 ════════════════════════════════════════╪═══ WAN PGA ──► Casa Matriz ═══════════════════
                                         ▼
                           ingress VIP 10.254.34.2 : 443
@@ -76,7 +76,7 @@ ns echoserver                                        ▼
                                     │  jwksUrl -> local (24)   │ el JWKS pineado + claims
                                     └───────────┬──────────────┘
                                                 ▼
-                                          server2 :8080  (SIM_SITE=dev1-lowmz)
+                                          backend :8080  (SIM_SITE=dev1-lowmz)
 ```
 
 ## 3. Qué cambia, y qué no
@@ -106,7 +106,7 @@ instalada en `paas-dev1-lowmz` (el cluster corre OCP 4.20.16, con Day 2 en curso
    TCP 443 contra la ingress VIP. No está documentado en el repo: es el primer gate y, si
    falta, es un pedido a redes que bloquea todo lo demás.
 4. En el origen, la PoC en el estado de §6.1 del README: cutover hecho y wristband
-   emitiéndose, con `server` corriendo el BFF de [`../../echoserver-cascada/`](../../echoserver-cascada/).
+   emitiéndose, con `bff` corriendo el BFF de [`../../echoserver-cascada/`](../../echoserver-cascada/).
 
 Todo eso lo chequea de una pasada, sin tocar nada:
 
@@ -123,7 +123,7 @@ es un modo de falla real— y a dónde apunta hoy el DNS de `app2`.
 ### 5.1. Destino (`paas-dev1-lowmz`)
 
 ```bash
-oc --context=paas-dev1-lowmz apply -f 20-namespace-server2.yaml
+oc --context=paas-dev1-lowmz apply -f 20-namespace-backend.yaml
 
 oc --context=paas-dev1-lowmz -n echoserver create secret tls paas-demo-wildcard-tls \
   --cert=wildcard.paas-demo.bancogalicia.com.ar.crt \
@@ -145,7 +145,7 @@ Tiene que decir `kubernetes.io/tls` y **más de un certificado** (hoja + interme
 entonces:
 
 ```bash
-oc --context=paas-dev1-lowmz apply -f 21-gateway-ingress.yaml -f 22-route-passthrough.yaml -f 23-httproute-server2.yaml
+oc --context=paas-dev1-lowmz apply -f 21-gateway-ingress.yaml -f 22-route-passthrough.yaml -f 23-httproute-backend.yaml
 ```
 
 El JWKS se crea del archivo que produce el origen, nunca pegando `n` y `e` a mano:
@@ -162,7 +162,7 @@ oc --context=paas-dev1-lowmz apply -f 24-jwks-static.yaml -f 25-authpolicy-jwt.y
 deniega todo.
 
 ```bash
-oc --context=paas-dev1-lowmz -n echoserver get authpolicy server2-ingress-jwt \
+oc --context=paas-dev1-lowmz -n echoserver get authpolicy backend-ingress-jwt \
   -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{" "}{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
 ```
 
@@ -175,7 +175,7 @@ openssl s_client -connect 10.254.34.2:443 -servername app2.paas-demo.bancogalici
 
 curl -sS -o /dev/null -w '%{http_code}\n' \
   --resolve app2.paas-demo.bancogalicia.com.ar:443:10.254.34.2 \
-  -H 'Host: server2.echoserver.svc.cluster.local:8080' \
+  -H 'Host: backend.poc-egress-kuadrant.svc.cluster.local:8080' \
   https://app2.paas-demo.bancogalicia.com.ar/
 ```
 
@@ -186,11 +186,11 @@ significaría que el destino contesta sin exigir token.
 ### 5.2. Origen (`paas-arqlab`) — fase A, sin tocar el DNS
 
 ```bash
-oc --context=paas-arqlab -n echoserver create secret generic destino-ca \
+oc --context=paas-arqlab -n poc-egress-kuadrant create secret generic destino-ca \
   --from-file=ca.crt=ca-interna-galicia.pem --from-file=cacert=ca-interna-galicia.pem \
   --dry-run=client -o yaml | oc --context=paas-arqlab apply -f -
 
-oc --context=paas-arqlab apply -n echoserver -f 26-serviceentry-origen.yaml -f ../origen/04-destinationrule-tls.yaml
+oc --context=paas-arqlab apply -n poc-egress-kuadrant -f 26-serviceentry-origen.yaml -f ../origen/04-destinationrule-tls.yaml
 ```
 
 **Esta fase vale mucho más de lo que parece.** Como el SNI lo fija el `DestinationRule` y
@@ -214,7 +214,7 @@ Desde acá es el procedimiento real, sin variantes propias de esta carpeta:
 El reparto se cuenta por el marcador, no comparando hashes de pod:
 
 ```bash
-for i in $(seq 1 100); do curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
+for i in $(seq 1 100); do curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
   | jq -r '.upstream.body.environment.SIM_SITE // "local"'; done | sort | uniq -c
 ```
 
@@ -240,14 +240,14 @@ recién ahora es interesante: es la primera vez que el `exp` se evalúa contra *
 Y el detalle completo de un request:
 
 ```bash
-curl -s -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
+curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/ \
   | jq '{st:.upstream.status, ms:.upstream.latencyMs,
          site:(.upstream.body.environment.SIM_SITE // "local"),
          src_cluster:.upstream.body.request.headers["x-forwarded-src-cluster"],
          host_visto:.upstream.body.request.headers.host}'
 ```
 
-`host_visto` tiene que seguir siendo `server2.echoserver.svc.cluster.local:8080` aunque el
+`host_visto` tiene que seguir siendo `backend.poc-egress-kuadrant.svc.cluster.local:8080` aunque el
 SNI haya sido `app2...`: es la confirmación de que el Host no se reescribe y de que el
 router no lo tocó.
 
@@ -276,7 +276,7 @@ CTX_DST=paas-dev1-lowmz CRT=./wildcard.crt KEY=./wildcard.key ./27-reparar.sh   
 El atajo que decide sin correr nada: mirar **qué condiciones tiene el HTTPRoute**.
 
 ```bash
-oc --context=paas-dev1-lowmz -n echoserver get httproute server2 \
+oc --context=paas-dev1-lowmz -n echoserver get httproute backend \
   -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 ```
 
@@ -296,7 +296,7 @@ app2.paas-demo.bancogalicia.com.ar.   CNAME  <lo que publique el router de paas-
 Después del corte, del lado origen:
 
 ```bash
-oc --context=paas-arqlab apply -n echoserver -f ../origen/02-serviceentry-destino.yaml
+oc --context=paas-arqlab apply -n poc-egress-kuadrant -f ../origen/02-serviceentry-destino.yaml
 ```
 
 que vuelve a `resolution: DNS` sin `endpoints` y deja
@@ -304,7 +304,7 @@ que vuelve a `resolution: DNS` sin `endpoints` y deja
 tomó el endpoint nuevo, porque es exactamente donde falló la corrida del 2026-08-04:
 
 ```bash
-POD=$(oc -n echoserver get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
+POD=$(oc -n poc-egress-kuadrant get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o name | head -1)
 oc -n echoserver exec $POD -c istio-proxy -- pilot-agent request GET clusters | grep -F app2.paas-demo
 ```
 
@@ -337,9 +337,9 @@ desarrollado en el README §8 punto 6, junto con la recomendación de desacoplar
 
 ```bash
 oc --context=paas-dev1-lowmz delete ns echoserver
-oc --context=paas-arqlab -n echoserver delete serviceentry server2-destino
-oc --context=paas-arqlab -n echoserver delete destinationrule server2-destino-tls
-oc --context=paas-arqlab apply -n echoserver -f ../origen/08-rollout/fase0a-solo-local.yaml
+oc --context=paas-arqlab -n poc-egress-kuadrant delete serviceentry backend-destino
+oc --context=paas-arqlab -n poc-egress-kuadrant delete destinationrule backend-destino-tls
+oc --context=paas-arqlab apply -n poc-egress-kuadrant -f ../origen/08-rollout/fase0a-solo-local.yaml
 ```
 
 La última línea es la que importa: devuelve el HTTPRoute al estado base sin destino. Sin
@@ -348,10 +348,10 @@ eso quedaría un `backendRef` apuntando a un host que ya no existe.
 ## 10. Archivos
 
 ```
-20-namespace-server2.yaml     DESTINO: ns + server2 remoto (SIM_SITE=dev1-lowmz)
+20-namespace-backend.yaml     DESTINO: ns + backend remoto (SIM_SITE=dev1-lowmz)
 21-gateway-ingress.yaml       DESTINO: Gateway HTTPS:443 ClusterIP + wildcard real
 22-route-passthrough.yaml     DESTINO: publicación por el router HAProxy — la pieza nueva
-23-httproute-server2.yaml     DESTINO: ruta a server2, sin hostnames
+23-httproute-backend.yaml     DESTINO: ruta a backend, sin hostnames
 24-jwks-static.yaml           DESTINO: JWKS pineado (el ConfigMap sale de ../keys/out/)
 25-authpolicy-jwt.yaml        DESTINO: validación del wristband, claims sin cambios
 26-serviceentry-origen.yaml   ORIGEN: endpoint fijado a la VIP — temporal, hasta el CNAME

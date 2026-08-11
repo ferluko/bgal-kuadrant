@@ -1,29 +1,29 @@
-# HOP 1 — `server`, el BFF. Es el que encadena.
+# HOP 1 — `bff`, el BFF. Es el que encadena.
 #
-#   bastión --> server (este) --> server2 --> server (anida la respuesta) --> bastión
+#   bastión --> bff (este) --> backend --> bff (anida la respuesta) --> bastión
 #
-# ATENCIÓN si ya tenés `server` desplegado como echo-server puro en `echoserver`:
-# este Deployment lo REEMPLAZA. Mantiene a propósito `app: server` y el puerto 8080
-# para que el Service `server`, el HTTPRoute `app1` y las policies de Kuadrant sigan
+# ATENCIÓN si ya tenés `bff` desplegado como echo-server puro en `echoserver`:
+# este Deployment lo REEMPLAZA. Mantiene a propósito `app: bff` y el puerto 8080
+# para que el Service `bff`, el HTTPRoute `app1` y las policies de Kuadrant sigan
 # enganchando sin cambios. Guardá el manifiesto anterior antes de aplicar:
-#   oc -n echoserver get deploy server -o yaml > /tmp/server-deploy.bak.yaml
+#   oc -n poc-egress-kuadrant get deploy bff -o yaml > /tmp/bff-deploy.bak.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: server
-  namespace: echoserver
+  name: bff
+  namespace: poc-egress-kuadrant
   labels:
-    app: server
+    app: bff
     poc.galicia.io/rol: cascada-hop1
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
-      app: server
+      app: bff
   template:
     metadata:
       labels:
-        app: server
+        app: bff
         poc.galicia.io/rol: cascada-hop1
     spec:
       containers:
@@ -37,14 +37,14 @@ spec:
             - name: PORT
               value: "8080"
             - name: HOP_NAME
-              value: server
+              value: bff
             # ESTA es la URL que la PoC de egreso intercepta cambiándole el selector
-            # al Service server2. El BFF no se entera: sigue pegándole al mismo FQDN.
+            # al Service backend. El BFF no se entera: sigue pegándole al mismo FQDN.
             - name: UPSTREAM_URL
-              value: http://server2.echoserver.svc.cluster.local:8080
+              value: http://backend.poc-egress-kuadrant.svc.cluster.local:8080
             - name: UPSTREAM_TIMEOUT_MS
               value: "5000"
-            # false => este hop devuelve 200 aunque server2 conteste 503, y el 503 se ve
+            # false => este hop devuelve 200 aunque backend conteste 503, y el 503 se ve
             # en .upstream.status. Poner "true" para que curl -w '%{http_code}' lo refleje.
             - name: MIRROR_UPSTREAM_STATUS
               value: "false"
@@ -85,14 +85,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: server
-  namespace: echoserver
+  name: bff
+  namespace: poc-egress-kuadrant
   labels:
-    app: server
+    app: bff
 spec:
   type: ClusterIP
   selector:
-    app: server
+    app: bff
   ports:
     - name: server-port
       port: 8080

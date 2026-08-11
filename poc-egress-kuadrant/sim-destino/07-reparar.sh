@@ -16,12 +16,12 @@
 # Es idempotente: se puede correr las veces que haga falta.
 set -uo pipefail
 
-NS="${NS:-echoserver}"
+NS="${NS:-poc-egress-kuadrant}"
 NS_SIM="${NS_SIM:-echoserver-eks-sim}"
 FQDN="${FQDN:-app2.paas-demo.bancogalicia.com.ar}"
-HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
+HOST_INTERNO="${HOST_INTERNO:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
 URL="${URL:-http://10.254.28.68}"
-HOST="${HOST:-app1.paas-demo.bancogalicia.com.ar}"
+HOST="${HOST:-bff.paas-demo.bancogalicia.com.ar}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -t 1 ]]; then V=$'\e[32m'; R=$'\e[31m'; B=$'\e[1m'; D=$'\e[2m'; Z=$'\e[0m'; else V=; R=; B=; D=; Z=; fi
@@ -31,7 +31,7 @@ err(){  printf '   %s✘%s %s\n' "$R" "$Z" "$1"; }
 inf(){  printf '   %s%s%s\n' "$D" "$1" "$Z"; }
 
 directo() {  # $1=ip  $2=token(opcional) -> imprime el status HTTP
-  oc -n "$NS" exec -i deploy/server -- python3 - "$1" "$FQDN" "$HOST_INTERNO" "${2-}" <<'PY' 2>/dev/null || echo ERROR
+  oc -n "$NS" exec -i deploy/bff -- python3 - "$1" "$FQDN" "$HOST_INTERNO" "${2-}" <<'PY' 2>/dev/null || echo ERROR
 import http.client, socket, ssl, sys
 ip, fqdn, hosthdr, tok = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 ctx = ssl._create_unverified_context()
@@ -65,7 +65,7 @@ diagnostico_camino_local() {
      body            = \(.upstream.body | if type=="object" then "(JSON ok)" else (tostring | .[0:300]) end)"' <<<"$j" 2>/dev/null \
     || { inf "     la respuesta ni siquiera es JSON:"; printf '%s\n' "${j:0:300}" | sed 's/^/     /'; }
   inf "estado de la AuthPolicy de EGRESO (la que firma):"
-  oc -n "$NS" get authpolicy egress-server2-jwt \
+  oc -n "$NS" get authpolicy egress-backend-jwt \
     -o jsonpath='     Accepted={.status.conditions[?(@.type=="Accepted")].status} Enforced={.status.conditions[?(@.type=="Enforced")].status}{"\n"}' 2>/dev/null
   inf "últimas líneas de Authorino sobre la firma:"
   local A; A=$(oc -n kuadrant-system get deploy -o name 2>/dev/null | grep -i authorino | head -1)
@@ -104,7 +104,7 @@ oc -n "$NS_SIM" rollout status deploy/jwks-egress --timeout=90s >/dev/null 2>&1 
   && ok "jwks-egress Ready" || err "jwks-egress no quedó Ready — revisar 'oc -n $NS_SIM describe deploy jwks-egress'"
 
 paso "A3. Comprobar que el JWKS se sirve de verdad"
-SERVIDO=$(oc -n "$NS" exec -i deploy/server -- python3 -c \
+SERVIDO=$(oc -n "$NS" exec -i deploy/bff -- python3 -c \
   "import urllib.request;print(urllib.request.urlopen('http://jwks-egress.$NS_SIM.svc.cluster.local:8080/jwks.json',timeout=6).read().decode())" 2>&1)
 if jq -e '.keys[0].kid' >/dev/null 2>&1 <<<"$SERVIDO"; then
   ok "servido: $(jq -c '.keys[0] | {kid, alg, use}' <<<"$SERVIDO")"
@@ -115,11 +115,11 @@ fi
 
 paso "A4. Forzar a Authorino a re-leer el JWKS (cachea el fetch, incluso el fallido)"
 # Recrear la AuthPolicy regenera el AuthConfig y con él el cache de la key.
-oc -n "$NS_SIM" delete authpolicy server2-ingress-jwt >/dev/null 2>&1
+oc -n "$NS_SIM" delete authpolicy backend-ingress-jwt >/dev/null 2>&1
 sleep 3
 oc apply -f "$DIR/05-authpolicy-jwt.yaml" >/dev/null 2>&1
 for _ in $(seq 1 20); do
-  E=$(oc -n "$NS_SIM" get authpolicy server2-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
+  E=$(oc -n "$NS_SIM" get authpolicy backend-ingress-jwt -o jsonpath='{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
   [[ "$E" == "True" ]] && break; sleep 3
 done
 [[ "${E:-}" == "True" ]] && ok "AuthPolicy Enforced" || err "AuthPolicy no llegó a Enforced (=${E:-vacio})"

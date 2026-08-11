@@ -3,8 +3,8 @@
 # Vive en el mismo namespace que la app para que el "secreto de firma" quede
 # local al ns (requisito: Authorino sólo lee Secrets del ns del AuthConfig).
 #
-# El listener es HTTP:8080 porque el cliente (server) sigue hablando texto plano
-# contra "server2.echoserver.svc.cluster.local:8080". El TLS hacia el cluster
+# El listener es HTTP:8080 porque el cliente (bff) sigue hablando texto plano
+# contra "backend.poc-egress-kuadrant.svc.cluster.local:8080". El TLS hacia el cluster
 # destino lo origina el gateway (ver 04-destinationrule-tls.yaml).
 #
 # La label kuadrant.io/gateway: "true" es la que habilita a Kuadrant/RHCL a
@@ -13,7 +13,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: egress-gw
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     kuadrant.io/gateway: "true"
   annotations:
@@ -34,21 +34,21 @@ spec:
       protocol: HTTP
       port: 8080
       # Sin hostname: las HTTPRoutes definen las variantes admitidas del Host
-      # (FQDN y formas abreviadas como `server2`). Restringir este listener al
+      # (FQDN y formas abreviadas como `backend`). Restringir este listener al
       # FQDN impediría atender esas variantes, aunque figuren en la route.
       allowedRoutes:
         namespaces:
           from: Same
 ---
 # Verificación:
-#   oc -n echoserver get gateway egress-gw \
+#   oc -n poc-egress-kuadrant get gateway egress-gw \
 #     -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}{"\n"}'
 #
 #   # los pods DEBEN quedar en este namespace: es lo que permite que el Service
-#   # server2 los seleccione en el cutover (09). Si caen en openshift-ingress,
+#   # backend los seleccione en el cutover (09). Si caen en openshift-ingress,
 #   # usar alternativas/interceptacion-externalname.yaml.
-#   oc -n echoserver get pods -l gateway.networking.k8s.io/gateway-name=egress-gw
-#   oc -n echoserver get svc  -l gateway.networking.k8s.io/gateway-name=egress-gw
+#   oc -n poc-egress-kuadrant get pods -l gateway.networking.k8s.io/gateway-name=egress-gw
+#   oc -n poc-egress-kuadrant get svc  -l gateway.networking.k8s.io/gateway-name=egress-gw
 #
 # El Service DEBE salir TYPE=ClusterIP y sin nodePorts. Si sale LoadBalancer, ver
 # la variante con infrastructure.parametersRef en 00-smoke-wristband/01-gateway-smoke.yaml.

@@ -149,13 +149,13 @@ habrían vuelto sin explicación aparente.
 [`Ealenn/Echo-Server`](https://github.com/Ealenn/Echo-Server) sólo refleja el request entrante.
 No tiene `BACKEND_URL`, `PROXY` ni `FORWARD`: **no hace llamadas salientes**.
 
-La PoC asumía que `server` consumía `server2.echoserver.svc.cluster.local:8080`. No lo hacía:
+La PoC asumía que `bff` consumía `backend.poc-egress-kuadrant.svc.cluster.local:8080`. No lo hacía:
 **el salto que esta PoC migra no existía**, y toda la validación se apoyaba en `oc exec … curl`,
 que prueba la red del pod pero no el camino de la aplicación.
 
-**Consecuencia:** [`../echoserver-cascada/`](../echoserver-cascada/) — `server` pasa a ser un BFF
+**Consecuencia:** [`../echoserver-cascada/`](../echoserver-cascada/) — `bff` pasa a ser un BFF
 mínimo (stdlib de Python sobre ConfigMap) que refleja su propio request y le cuelga abajo la
-respuesta completa de `server2`. El extremo sigue siendo `echo-server` sin tocar, que es donde
+respuesta completa de `backend`. El extremo sigue siendo `echo-server` sin tocar, que es donde
 más rinde: devuelve crudo todo lo que le llegó, incluido el `x-egress-token`.
 
 ---
@@ -182,14 +182,14 @@ de "un solo contenedor" quedó como gate en `run-escenarios.sh` (E0).
 En su salida, **`.host.hostname` es el header `Host`** del request y **`.host.ip` es la IP del
 cliente**. Ninguno identifica al pod que respondió.
 
-El §7.3 original contaba el reparto del canary con `grep -o 'server2[a-z0-9-]*'` sobre la
-respuesta. Como el request va con `Host: server2.echoserver.svc.cluster.local`, ese grep
+El §7.3 original contaba el reparto del canary con `grep -o 'backend[a-z0-9-]*'` sobre la
+respuesta. Como el request va con `Host: backend.poc-egress-kuadrant.svc.cluster.local`, ese grep
 matcheaba el propio Host: daba **100 % "local" viniera la respuesta de donde viniera**. El
 rollout 75/25 se veía correcto aunque el canary estuviera roto — un falso verde en el paso que
 decide si la migración avanza.
 
 **Consecuencia:** el pod sale de `.environment.HOSTNAME`, que exige `ENABLE__ENVIRONMENT=true`
-en el `server2` de los dos lados. Y `.host.ip` sí sirve, pero para otra cosa: es la IP de origen
+en el `backend` de los dos lados. Y `.host.ip` sí sirve, pero para otra cosa: es la IP de origen
 como la ve el destino, o sea la señal directa de que la intercepción tomó efecto.
 
 ---
@@ -197,7 +197,7 @@ como la ve el destino, o sea la señal directa de que la intercepción tomó efe
 <a id="h4"></a>
 ## H4. El cliente manda el `Host` con puerto — 2026-08-04
 
-`urllib` arma `Host: server2.echoserver.svc.cluster.local:8080` (con puerto, porque no es el 80).
+`urllib` arma `Host: backend.poc-egress-kuadrant.svc.cluster.local:8080` (con puerto, porque no es el 80).
 El listener del gateway de egreso declara `hostname:` **sin** puerto, y todas las verificaciones
 del repo curleaban sin él.
 
@@ -236,13 +236,13 @@ exitoso no prueba que el spec haya quedado completo.**
 <a id="h7"></a>
 ## H7. Cutover contra el gateway equivocado — 2026-08-04
 
-El `Service server2` tenía el selector apuntando a `gw-echoserver` —el gateway de *entrada* del
-app— en vez de a `egress-gw`. Su listener es el 80 y `server2` declara `targetPort: 8080`: no
+El `Service backend` tenía el selector apuntando a `gw-echoserver` —el gateway de *entrada* del
+app— en vez de a `egress-gw`. Su listener es el 80 y `backend` declara `targetPort: 8080`: no
 había nadie escuchando ahí, y el BFF devolvía 502 con `Connection refused`.
 
 **Consecuencia:** el assert anti-loop y la verificación de endpoints quedaron como gate en E0. El
-riesgo hermano es peor: si el `backendRef` del HTTPRoute apuntara a `server2` en vez de
-`server2-local`, post-cutover el Service selecciona los pods del propio gateway y el loop es
+riesgo hermano es peor: si el `backendRef` del HTTPRoute apuntara a `backend` en vez de
+`backend-local`, post-cutover el Service selecciona los pods del propio gateway y el loop es
 infinito entre Envoy y kube-proxy, con una firma por vuelta. Ningún contador de la app lo frena.
 
 ---
@@ -295,7 +295,7 @@ NLB del destino y con SNI `app2.paas-demo.bancogalicia.com.ar`:
 
 | `Host` enviado | Respuesta |
 |---|---|
-| `server2.echoserver.svc.cluster.local:8080` | **401** + `www-authenticate: x-egress-token realm="egress-wristband"` |
+| `backend.poc-egress-kuadrant.svc.cluster.local:8080` | **401** + `www-authenticate: x-egress-token realm="egress-wristband"` |
 | `app2.paas-demo.bancogalicia.com.ar` | 404 |
 | el FQDN del NLB | 404 |
 
@@ -376,20 +376,20 @@ vs 184 ms — confirmando que verificar la cadena no tiene costo medible.
 Primer montaje del destino OCP en `paas-dev1-lowmz`. La `AuthPolicy` quedó así:
 
 ```console
-$ oc -n echoserver get authpolicy server2-ingress-jwt -o jsonpath='{...Accepted...}{" "}{...Enforced...}'
+$ oc -n echoserver get authpolicy backend-ingress-jwt -o jsonpath='{...Accepted...}{" "}{...Enforced...}'
 True False
-$ oc -n echoserver get authpolicy server2-ingress-jwt -o jsonpath='{...Enforced...message}'
+$ oc -n echoserver get authpolicy backend-ingress-jwt -o jsonpath='{...Enforced...message}'
 AuthPolicy is not in the path to any existing routes
 ```
 
 El mensaje no nombra ningún objeto, así que el primer reflejo fue ir al JWKS —lo único que la
-policy referencia por URL— y estaba impecable: `kid` correcto, RSA/RS256, los dos pods del server
+policy referencia por URL— y estaba impecable: `kid` correcto, RSA/RS256, los dos pods del bff
 Running.
 
 La pista real estaba en el `HTTPRoute`, y **por ausencia**:
 
 ```console
-$ oc -n echoserver get httproute server2 -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+$ oc -n echoserver get httproute backend -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 kuadrant.io/AuthPolicyAffected=True(Accepted)
 ```
 

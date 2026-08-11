@@ -417,7 +417,7 @@ spec:
     - name: gw-hostnet
       namespace: connlink-ingress
   hostnames:
-    - app1.paas-demo.bancogalicia.com.ar
+    - bff.paas-demo.bancogalicia.com.ar
   rules:
     - matches:
         - path: { type: PathPrefix, value: / }
@@ -431,7 +431,7 @@ Sin `sectionName`, engancha en todos los listeners compatibles.
 ```bash
 oc -n echoserver get httproute echo -o jsonpath='{range .status.parents[*]}{.parentRef.name}{": "}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 oc -n connlink-ingress get gateway gw-hostnet -o jsonpath='{range .status.listeners[*]}{.name}{" attachedRoutes="}{.attachedRoutes}{"\n"}{end}'
-for ip in 10.254.28.68 10.254.28.62 10.254.28.63; do echo -n "$ip -> "; curl -sS -H 'Host: app1.paas-demo.bancogalicia.com.ar' http://$ip/ -o /dev/null -w '%{http_code}\n' --max-time 5; done
+for ip in 10.254.28.68 10.254.28.62 10.254.28.63; do echo -n "$ip -> "; curl -sS -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://$ip/ -o /dev/null -w '%{http_code}\n' --max-time 5; done
 ```
 
 Los tres nodos deben responder (es un DaemonSet). Interpretación: **404** = el route no enganchó

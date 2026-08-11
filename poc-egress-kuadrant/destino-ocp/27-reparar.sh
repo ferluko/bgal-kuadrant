@@ -25,13 +25,13 @@ set -uo pipefail
 CTX_DST="${CTX_DST:-}"
 NS_DST="${NS_DST:-echoserver}"
 GW="${GW:-ingress-gw}"
-ROUTE="${ROUTE:-server2}"
-POLICY="${POLICY:-server2-ingress-jwt}"
+ROUTE="${ROUTE:-backend}"
+POLICY="${POLICY:-backend-ingress-jwt}"
 LISTENER="${LISTENER:-https}"
 CERT_SECRET="${CERT_SECRET:-paas-demo-wildcard-tls}"
 FQDN="${FQDN:-app2.paas-demo.bancogalicia.com.ar}"
 DST_IP="${DST_IP:-10.254.34.2}"
-HOST_INTERNO="${HOST_INTERNO:-server2.echoserver.svc.cluster.local:8080}"
+HOST_INTERNO="${HOST_INTERNO:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
 CRT="${CRT:-}"   # opcional: si el Secret falta, se crea con estos dos archivos
 KEY="${KEY:-}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -150,7 +150,7 @@ fi
 
 # ─────────────────────────────────────────────────── R4. la adopción del HTTPRoute
 paso "R4. HTTPRoute $ROUTE adoptado por el Gateway"
-ocd -n "$NS_DST" get httproute "$ROUTE" >/dev/null 2>&1 || { err "no existe — aplicar 23-httproute-server2.yaml"; cortar; }
+ocd -n "$NS_DST" get httproute "$ROUTE" >/dev/null 2>&1 || { err "no existe — aplicar 23-httproute-backend.yaml"; cortar; }
 
 # La condición `Accepted` la escribe el controller de Gateway API. Si el status SÓLO trae
 # `kuadrant.io/AuthPolicyAffected`, el HTTPRoute no fue adoptado por ningún Gateway: es
@@ -171,7 +171,7 @@ fi
 RR=$(ocd -n "$NS_DST" get httproute "$ROUTE" \
      -o jsonpath='{range .status.parents[*]}{range .conditions[?(@.type=="ResolvedRefs")]}{.status}{end}{end}' 2>/dev/null)
 [[ "$RR" == *"True"* ]] && ok "ResolvedRefs=True" \
-                        || { err "ResolvedRefs=$RR — el backendRef server2:8080 no resuelve"; cortar; }
+                        || { err "ResolvedRefs=$RR — el backendRef backend:8080 no resuelve"; cortar; }
 
 # ─────────────────────────────────────────────────── R5. la AuthPolicy, recién ahora
 paso "R5. AuthPolicy $POLICY"

@@ -1,10 +1,10 @@
-# Destino SIMULADO — ruta al server2 remoto. Calcado de destino/12-httproute-server2.yaml.
+# Destino SIMULADO — ruta al backend remoto. Calcado de destino/12-httproute-backend.yaml.
 #
 # SIN `hostnames`, a propósito y por dos motivos que se refuerzan:
 #   1. El listener del Gateway (02) tampoco declara `hostname`, así que la route hereda y
 #      matchea cualquier Host.
 #   2. El diseño del egreso NO reescribe el Host (README §4): el request llega con
-#      `Host: server2.echoserver.svc.cluster.local` —el del cliente original— aunque el SNI
+#      `Host: backend.poc-egress-kuadrant.svc.cluster.local` —el del cliente original— aunque el SNI
 #      sea `app2.paas-demo.bancogalicia.com.ar`. Si acá se declarara el FQDN público, la
 #      route no engancharía y el síntoma sería un 404 del destino, no un error de config.
 #
@@ -13,7 +13,7 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: server2
+  name: backend
   namespace: echoserver-eks-sim
 spec:
   parentRefs:
@@ -25,10 +25,10 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: server2
+        - name: backend
           port: 8080
 ---
 # Verificación:
-#   oc -n echoserver-eks-sim get httproute server2 \
+#   oc -n echoserver-eks-sim get httproute backend \
 #     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
 #   -> Accepted=True ResolvedRefs=True, y después kuadrant.io/AuthPolicyAffected=True al aplicar 05

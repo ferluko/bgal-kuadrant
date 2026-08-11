@@ -15,10 +15,10 @@
 set -uo pipefail
 
 ING="${ING:-10.254.28.68}"
-HOSTAPP1="${HOSTAPP1:-app1.paas-demo.bancogalicia.com.ar}"
+HOSTAPP1="${HOSTAPP1:-bff.paas-demo.bancogalicia.com.ar}"
 DEST="${DEST:-app2.paas-demo.bancogalicia.com.ar}"
-HOSTINT="${HOSTINT:-server2.echoserver.svc.cluster.local:8080}"
-NS="${NS:-echoserver}"
+HOSTINT="${HOSTINT:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
+NS="${NS:-poc-egress-kuadrant}"
 KEY="${KEY:-keys/out/key.pem}"
 CA="${CA:-/tmp/ca-galicia.pem}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -121,15 +121,15 @@ if [[ "$(f "$J" '.upstream.status')" != "200" ]]; then
   nota "error del salto: $(f "$J" '.upstream.error')"
   nota "Los actos 3 y 4 necesitan un token; sin un request exitoso se omiten."
 fi
-nota "La URL es la de siempre: server2.echoserver.svc.cluster.local:8080"
+nota "La URL es la de siempre: backend.poc-egress-kuadrant.svc.cluster.local:8080"
 espera
 
 # ─────────────────────────────────────────────────────────────────────────────
 acto "2 · Pero el tráfico ya no va donde iba" \
      "El Service no se recreó: se le cambió el selector. Misma IP, mismo nombre."
 
-CIP=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
-SEL=$(oc -n "$NS" get svc server2 -o jsonpath='{.spec.selector}' 2>/dev/null)
+CIP=$(oc -n "$NS" get svc backend -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+SEL=$(oc -n "$NS" get svc backend -o jsonpath='{.spec.selector}' 2>/dev/null)
 GWIP=$(oc -n "$NS" get pod -l gateway.networking.k8s.io/gateway-name=egress-gw -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
 dato "ClusterIP del Service:" "$CIP"
 dato "su selector ahora:"     "$SEL"
@@ -249,7 +249,7 @@ if (( MIGRACION )); then
   restaurar() { printf '\n   %srestaurando el estado previo…%s\n' "$D" "$Z"; oc apply -n "$NS" -f "$PREV" >/dev/null 2>&1 && echo "   ok"; }
   trap restaurar EXIT
   oc apply -n "$NS" -f "$DIR/origen/08-rollout/fase2-pesos.yaml" >/dev/null 2>&1
-  oc -n "$NS" patch httproute egress-server2 --type json -p \
+  oc -n "$NS" patch httproute egress-backend --type json -p \
     '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":75},
       {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":25}]' >/dev/null 2>&1
   sleep 5

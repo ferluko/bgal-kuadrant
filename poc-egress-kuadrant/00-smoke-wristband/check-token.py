@@ -158,7 +158,7 @@ def main():
         "aud": "app2.paas-demo.bancogalicia.com.ar",
         "src_cluster": "paas-arqlab",
         "src_namespace": "echoserver",
-        "dst_service": "server2",
+        "dst_service": "backend",
     }
     for k, v in esperados.items():
         if payload.get(k) != v:

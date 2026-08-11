@@ -11,8 +11,8 @@
 apiVersion: networking.istio.io/v1
 kind: ServiceEntry
 metadata:
-  name: server2-destino
-  namespace: echoserver
+  name: backend-destino
+  namespace: poc-egress-kuadrant
 spec:
   hosts:
     # <<< PLACEHOLDER: FQDN público del gateway del cluster destino
@@ -42,7 +42,7 @@ spec:
 #
 # Chequeo desde un pod del cluster origen (no `oc debug`, que en este cluster falla por
 # admission — ver runbook de ingress §9):
-#   oc -n echoserver run neteste --rm -it --restart=Never \
+#   oc -n poc-egress-kuadrant run neteste --rm -it --restart=Never \
 #     --image=registry.access.redhat.com/ubi9/ubi-minimal -- sh -c '
 #       getent hosts app2.paas-demo.bancogalicia.com.ar;
 #       curl -sS -o /dev/null -w "%{http_code}\n" --max-time 5 \

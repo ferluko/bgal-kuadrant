@@ -65,7 +65,7 @@ spec:
 # SIN `hostname` EN EL LISTENER, a propósito
 #
 # El egreso NO reescribe el Host (README §4): el request llega con
-# `Host: server2.echoserver.svc.cluster.local:8080` y sólo el SNI dice `app2...`. Un
+# `Host: backend.poc-egress-kuadrant.svc.cluster.local:8080` y sólo el SNI dice `app2...`. Un
 # listener con `hostname` matchea contra el SNI, así que técnicamente andaría — pero si el
 # valor no coincide con algún SAN, el TLS resetea con "no peer certificate available" y el
 # diagnóstico es confuso. Es la misma conclusión de `destino/10` y del runbook de ingress

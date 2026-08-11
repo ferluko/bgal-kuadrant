@@ -1,10 +1,10 @@
-# OPCIONAL — cascada de 3+ niveles: bastión -> server -> server2b -> server3.
+# OPCIONAL — cascada de 3+ niveles: bastión -> bff -> server2b -> server3.
 #
 # El mismo ConfigMap `cascade-bff` sirve para cualquier hop. Con `UPSTREAM_URL` vacío el
 # BFF es un echo terminal (equivalente funcional al echo-server, misma forma de JSON);
 # con `UPSTREAM_URL` seteado, encadena. Así se arma la profundidad que haga falta:
 #
-#   server (UPSTREAM_URL=server2b) --> server2b (UPSTREAM_URL=server3) --> server3 (sin upstream)
+#   bff (UPSTREAM_URL=server2b) --> server2b (UPSTREAM_URL=server3) --> server3 (sin upstream)
 #
 # En la respuesta al bastión quedan anidados: .upstream.body.upstream.body
 # MAX_DEPTH (default 5) corta el ciclo si alguien deja un upstream apuntando hacia atrás.
@@ -14,7 +14,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: server2b
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     app: server2b
     poc.galicia.io/rol: cascada-hop2
@@ -39,7 +39,7 @@ spec:
             - name: HOP_NAME
               value: server2b
             - name: UPSTREAM_URL
-              value: http://server3.echoserver.svc.cluster.local:8080
+              value: http://server3.poc-egress-kuadrant.svc.cluster.local:8080
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
           volumeMounts:
@@ -65,7 +65,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: server2b
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels: { app: server2b }
 spec:
   type: ClusterIP
@@ -78,7 +78,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: server3
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     app: server3
     poc.galicia.io/rol: cascada-hop3
@@ -99,7 +99,7 @@ spec:
           command: ["python3", "/opt/cascade/bff.py"]
           env:
             - { name: PORT, value: "8080" }
-            - { name: HOP_NAME, value: server3 }
+            - { name: HOP_NAME, value: bff3 }
             # Sin UPSTREAM_URL => echo terminal.
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
@@ -126,7 +126,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: server3
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels: { app: server3 }
 spec:
   type: ClusterIP

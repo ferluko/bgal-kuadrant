@@ -9,8 +9,8 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: egress-server2
-  namespace: echoserver
+  name: egress-backend
+  namespace: poc-egress-kuadrant
   annotations:
     poc.galicia.io/fase: "3-por-metodo"
 spec:
@@ -18,10 +18,10 @@ spec:
     - name: egress-gw
       sectionName: mesh-internal
   hostnames:
-    - "server2"
-    - "server2.echoserver"
-    - "server2.echoserver.svc"
-    - "server2.echoserver.svc.cluster.local"
+    - "backend"
+    - "backend.poc-egress-kuadrant"
+    - "backend.poc-egress-kuadrant.svc"
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
   rules:
     - name: lecturas-remoto
       matches:
@@ -44,7 +44,7 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: server2-local
+        - name: backend-local
           port: 8080
 ---
 # Variante combinada: agregar weight a los backendRefs de la rule `default` para
