@@ -1,0 +1,67 @@
+# Destino SIMULADO — Gateway de ingreso, el que hace de NLB + Envoy de EKS.
+#
+# Calcado de destino/10-gateway-ingress.yaml en lo que importa: termina TLS con el
+# certificado del FQDN real y lleva la label que habilita a Kuadrant a colgarle la
+# AuthPolicy de validación del wristband (05).
+#
+# DIFERENCIAS CON EL DESTINO REAL, a tener presentes al leer los resultados:
+#   - Service ClusterIP en vez de un NLB internal en passthrough. O sea: acá el TLS lo
+#     termina el mismo Envoy que en EKS, pero sin el L4 de AWS delante. Lo que NO se
+#     ejercita es el passthrough del NLB.
+#   - Sin RTT inter-cluster: la latencia que midas es sólo Envoy + Authorino.
+#   - Mismo reloj que el origen, así que el skew que puede invalidar el `exp: 300` del
+#     wristband NO se ejercita. Es el modo de falla que más se paga descubrir en prod.
+#
+# SIN `hostname` en el listener, a propósito: es la misma conclusión a la que llegan
+# destino/10 y el runbook de ingress §7.1. Con `hostname` puesto, si no matchea algún SAN
+# el TLS resetea con "no peer certificate available" y el diagnóstico es confuso.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ingress-sim
+  namespace: echoserver-eks-sim
+  labels:
+    # Habilita a Kuadrant/RHCL a gestionar políticas sobre este Gateway (necesario para 05).
+    kuadrant.io/gateway: "true"
+  annotations:
+    # Mismo motivo que en origen/01: sin esto el controller pide un LoadBalancer, queda
+    # EXTERNAL-IP <pending> para siempre y se asignan nodePorts.
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: app2-sim-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Verificación:
+#
+#   oc -n echoserver-eks-sim get gateway ingress-sim \
+#     -o jsonpath='{range .status.listeners[*]}{.name}{": "}{range .conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}{end}'
+#   -> Accepted=True Programmed=True ResolvedRefs=True
+#
+# OJO: `ResolvedRefs=True` NO prueba que el certificado haya llegado al proxy — se calcula
+# contra lo que istiod puede leer, y la entrega por SDS se evalúa después (es exactamente
+# el bloqueo abierto del runbook de ingress §7.2, ahí con otro gateway). El único indicador
+# confiable es el config dump del proxy:
+#
+#   POD=$(oc -n echoserver-eks-sim get pod -l gateway.networking.k8s.io/gateway-name=ingress-sim -o name | head -1)
+#   oc -n echoserver-eks-sim exec $POD -- curl -s localhost:15000/config_dump?resource=dynamic_active_secrets \
+#     | grep -o '"name": "[^"]*"'
+#
+# Y el handshake de punta a punta, desde un pod cualquiera:
+#
+#   oc -n echoserver-eks-sim run c$RANDOM --rm -i --restart=Never \
+#     --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+#     curl -sS -o /dev/null -w '%{http_code} tls=%{ssl_verify_result}\n' -k \
+#     --resolve app2.paas-demo.bancogalicia.com.ar:443:$(oc -n echoserver-eks-sim get svc ingress-sim-openshift-default -o jsonpath='{.spec.clusterIP}') \
+#     https://app2.paas-demo.bancogalicia.com.ar/
+#   -> 401 (el listener anda y la AuthPolicy de 05 enforcea: es la prueba negativa (a))

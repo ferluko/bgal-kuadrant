@@ -1,0 +1,89 @@
+# Cluster DESTINO OCP — clave pública pineada, servida localmente.
+#
+# Authorino no acepta JWKS inline: valida por `issuerUrl` (OIDC discovery) o por `jwksUrl`.
+# Para no depender de conectividad del destino hacia el origen, el JWKS se publica dentro
+# del propio cluster destino desde un ConfigMap. Clave preacordada, cero dependencia
+# cross-cluster — que es justamente la propiedad del diseño que interesa conservar cuando
+# los dos clusters están en sitios distintos.
+#
+# EL ConfigMap NO ESTÁ EN ESTE ARCHIVO. Se crea del archivo que produce
+# `keys/gen-signing-key.sh` en el ORIGEN, así no hay forma de que se desincronice del `kid`
+# real. Y ahora hay un paso más que en la simulación: **el archivo tiene que viajar de un
+# cluster al otro**. Es material público (sólo `n` y `e`), no hay secreto que proteger,
+# pero sí hay que asegurarse de copiar el vigente:
+#
+#   # en el origen
+#   jq -c '.keys[0] | {kid, kty, alg, use}' keys/out/jwks.json
+#
+#   # en el destino
+#   oc --context=<destino> -n echoserver create configmap jwks-egress-origen \
+#     --from-file=jwks.json=keys/out/jwks.json --dry-run=client -o yaml | oc --context=<destino> apply -f -
+#
+# **Reaplicarlo cada vez que se rote la clave de firma.** Es exactamente el paso que quedó
+# desincronizado del lado EKS y por el que hoy ese destino rechaza todos los tokens
+# ([H12](../HALLAZGOS.md#h12), [pedido-jwks-eks.md](../pedido-jwks-eks.md)). Acá el
+# problema es el mismo, con la diferencia de que el cluster lo administramos nosotros.
+#
+# El JWKS tiene que ser RSA: el verificador `jwt` de Authorino (go-oidc) sólo acepta RS256
+# — medido en paas-arqlab el 2026-08-05. Con una clave EC el destino rechaza el 100% de
+# los tokens con un 401 indistinguible de "falta el token", y el AuthConfig queda igual
+# Ready=True. `sim-destino/07-reparar.sh` §A1 hace ese chequeo y normaliza `alg`/`use`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwks-egress
+  namespace: echoserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: jwks-egress }
+  template:
+    metadata:
+      labels: { app: jwks-egress }
+    spec:
+      containers:
+        - name: httpd
+          image: registry.access.redhat.com/ubi9/httpd-24:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: jwks
+              mountPath: /var/www/html
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /jwks.json, port: 8080 }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: jwks
+          configMap:
+            name: jwks-egress-origen
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwks-egress
+  namespace: echoserver
+spec:
+  selector: { app: jwks-egress }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      appProtocol: http
+---
+# Verificación — el `kid` de acá tiene que ser el mismo que el del token que emite el
+# origen. Si no coinciden, el destino devuelve 401 a todo y el síntoma parece de red:
+#
+#   oc -n echoserver run c$RANDOM --rm -i --restart=Never \
+#     --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+#     curl -s http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+#
+# El ConfigMap montado no se recarga a tiempo por sí solo: después de actualizarlo,
+# `oc -n echoserver rollout restart deploy/jwks-egress`. Y Authorino cachea el fetch del
+# JWKS —incluso el fallido—, así que además hay que recrear la AuthPolicy (25).

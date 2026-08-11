@@ -1,0 +1,89 @@
+# Destino SIMULADO — el `server2` "remoto".
+#
+# Namespace aparte para que sea inconfundible cuál de los dos contestó, y para que las
+# NetworkPolicies del origen (07) no lo alcancen por accidente.
+#
+# `SIM_SITE=eks-sim` es el marcador del conteo: en la salida del BFF aparece como
+# `.upstream.body.environment.SIM_SITE`, así que el reparto se lee sin depender de
+# comparar hashes de pod:
+#
+#   jq -r '.upstream.body.environment.SIM_SITE // "local"'
+#
+# `ENABLE__ENVIRONMENT=true` es obligatorio para eso — igual que en el server2 local.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: echoserver-eks-sim
+  labels:
+    poc.galicia.io/rol: destino-simulado
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server2
+  namespace: echoserver-eks-sim
+  labels:
+    app: server2
+    poc.galicia.io/rol: destino-simulado
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server2
+  template:
+    metadata:
+      labels:
+        app: server2
+        poc.galicia.io/rol: destino-simulado
+    spec:
+      containers:
+        - name: echo-server
+          image: docker.io/ealen/echo-server:0.9.2
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOGS__IGNORE__PING
+              value: "true"
+            - name: ENABLE__ENVIRONMENT
+              value: "true"
+            - name: ENABLE__FILE
+              value: "false"
+            # Marcador para distinguirlo del server2 local en el conteo del reparto.
+            - name: SIM_SITE
+              value: eks-sim
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2
+  namespace: echoserver-eks-sim
+  labels:
+    app: server2
+spec:
+  type: ClusterIP
+  selector:
+    app: server2
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+      appProtocol: http

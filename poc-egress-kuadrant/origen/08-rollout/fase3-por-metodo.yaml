@@ -18,6 +18,9 @@ spec:
     - name: egress-gw
       sectionName: mesh-internal
   hostnames:
+    - "server2"
+    - "server2.echoserver"
+    - "server2.echoserver.svc"
     - "server2.echoserver.svc.cluster.local"
   rules:
     - name: lecturas-remoto

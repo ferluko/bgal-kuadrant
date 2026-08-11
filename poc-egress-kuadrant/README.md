@@ -1,5 +1,19 @@
 # PoC — Egreso seguro con Kuadrant/RHCL: mover `server2` a otro cluster sin tocar `server`
 
+> **Este documento es la referencia de detalle.** Si venís a entender la solución, empezá por
+> **[RESUMEN.md](RESUMEN.md)** — problema, diseño, qué se probó y qué falta, en 5 minutos.
+>
+> | | |
+> |---|---|
+> | Hilo conductor y resultados | **[RESUMEN.md](RESUMEN.md)** |
+> | Qué costó descubrir, con evidencia | [HALLAZGOS.md](HALLAZGOS.md) |
+> | Procedimiento para ejecutar hoy | [§6.1](#61-procedimiento-vigente--sin-cluster-destino-real) |
+> | Batería de verificación (37 chequeos) | [`sim-destino/run-escenarios.sh`](sim-destino/run-escenarios.sh) |
+> | Destino simulado, banco de pruebas del origen | [`sim-destino/`](sim-destino/) |
+> | Destino en otro cluster OpenShift | [`destino-ocp/`](destino-ocp/README.md) |
+> | Lo que falta del lado EKS | [pedido-jwks-eks.md](pedido-jwks-eks.md) |
+> | Workload que hace la cascada | [`../echoserver-cascada/`](../echoserver-cascada/) |
+
 ## 1. Objetivo
 
 `server` consume `http://server2.echoserver.svc.cluster.local:8080`. Queremos mover
@@ -41,7 +55,8 @@ reutiliza el patrón para otro consumidor.
 | FQDN del destino | `app2.paas-demo.bancogalicia.com.ar` | CNAME al NLB de EKS |
 | URL interna que NO cambia | `http://server2.echoserver.svc.cluster.local:8080` | lo que consume `server` |
 | Cluster origen | `paas-arqlab` — OCP 4.20, IPI vSphere, RHCL 1.3 | |
-| Cluster destino | **EKS** | Istio + Gateway API; ver §5.3 |
+| Cluster destino | **`paas-dev1-lowmz`** — OCP 4.20, otro sitio (CMZ) | publicado por el router HAProxy; ver [`destino-ocp/`](destino-ocp/README.md) |
+| Cluster destino (variante original) | **EKS** | Istio + Gateway API; ver §5.3. Queda fuera de juego al mover el CNAME de `app2` |
 | Gateway de ingress (origen) | `gw-hostnet` / ns `connlink-ingress` / class `ingress-hostnet` | hostNetwork, publicado por F5 |
 | Gateway de egreso (origen) | `egress-gw` / ns `echoserver` / class `openshift-default` | ClusterIP |
 | Gateway de ingreso (destino) | `ingress-gw` / ns `echoserver` / class `istio` | NLB internal, passthrough |
@@ -56,9 +71,16 @@ para reconocerlo en destino. **Authorino no firma HS256** — el wristband sopor
 ES256/ES384/ES512 y RS256/384/512 — y su verificador JWT tampoco está pensado para HMAC.
 
 La PoC conserva tu modelo de confianza (clave preacordada, sin IdP, sin dependencia de red
-entre clusters) usando un par EC P-256: la **privada vive sólo en el cluster origen** y al destino
+entre clusters) usando un par **RSA 2048**: la **privada vive sólo en el cluster origen** y al destino
 se le copia únicamente el **JWKS público**, servido desde un ConfigMap local. Ganás además que un
 compromiso del cluster destino no permite falsificar tokens de salida.
+
+> **RSA 2048 en PKCS#1, y el formato no es un detalle.** El diseño original usaba EC P-256 /
+> ES256 y no cierra: el verificador de Authorino acepta sólo RS256, y su firmador acepta RS256
+> pero lee la clave únicamente en PKCS#1 — el formato que `openssl genrsa` **no** emite por
+> default desde OpenSSL 3.x. Cualquiera de las dos cosas mal produce un fallo que apunta al
+> lado equivocado. `keys/gen-signing-key.sh` fuerza el formato y lo verifica.
+> Evidencia y consecuencias en [H9](HALLAZGOS.md#h9).
 
 **Corrección sobre "local al ns"** (verificado en `paas-arqlab`): esa parte de tu planteo no es
 alcanzable con Kuadrant. El operador traduce cada `AuthPolicy` a un `AuthConfig` en
@@ -68,7 +90,7 @@ del equipo de la app.
 
 Esto **no es sólo un cambio de ubicación**: rompe el modelo de aislamiento que buscabas y deja el
 patrón sin multi-tenancy hasta que se resuelva. Es una limitación abierta, desarrollada en §8bis y
-registrada como **OQ-11**. Si aun así querés HMAC estricto, está el camino en §8.6 (requiere un firmador propio) y
+registrada como **OQ-11**. Si aun así querés HMAC estricto, está el camino en §8.7 (requiere un firmador propio) y
 la variante Istio, que sí acepta JWKS `oct`, en
 [destino/13a-istio-jwt-validation.yaml](destino/13a-istio-jwt-validation.yaml).
 
@@ -91,15 +113,15 @@ ns echoserver                          ┌────────┐
   │ listener HTTP :8080  ├───────►│   Service     │
   │ class openshift-def. │        └───────────────┘
   ├──────────────────────┤
-  │ AuthPolicy           │  (2) Authorino firma wristband ES256 con el Secret
-  │  wristband ES256     │      egress-echoserver-1 (ns kuadrant-system, §8bis)
+  │ AuthPolicy           │  (2) Authorino firma wristband RS256 con el Secret
+  │  wristband RS256     │      egress-echoserver-1 (ns kuadrant-system, §8bis)
   │  → x-egress-token    │      claims: iss, aud, src_cluster, src_ns, exp=300s
   └──────────┬───────────┘
              │ peso  (3) TLS origination (DestinationRule).
              │           Host: server2.echoserver.svc.cluster.local  (NO se reescribe)
              │           SNI:  app2.paas-demo.bancogalicia.com.ar
              ▼
-   app2.paas-demo.bancogalicia.com.ar  ──CNAME──►  k8s-istiosys-kuadrant-c44863e1bd-bb81ccbd5c06a391.elb.us-east-1.amazonaws.com 
+   app2.paas-demo.bancogalicia.com.ar  ──CNAME──►  NLB internal del cluster destino (us-east-1)
              │
 ═════════════╪═══════ Direct Connect / VPN hacia la VPC ═══════════════
              ▼
@@ -255,21 +277,35 @@ Que el destino sea EKS y no otro OpenShift cambia cuatro cosas. Ninguna es opcio
    La alternativa de menor huella —validar con `RequestAuthentication` de Istio, sin Kuadrant en
    EKS— queda documentada en [13a](destino/13a-istio-jwt-validation.yaml).
 
-3. **Conectividad y DNS — el riesgo operativo más grande de la migración.**
-   - Ruteo L3 a la VPC: Direct Connect o VPN.
-   - `app2.paas-demo.bancogalicia.com.ar` CNAME al NLB. Con NLB `internal` el nombre resuelve
-     a IPs privadas: el DNS corporativo tiene que resolver la zona de AWS (forwarding a
-     Route53 Resolver o zona privada compartida). **Verificarlo desde un pod del cluster
-     origen**, no desde el bastión — el resolver del pod es CoreDNS.
-   - **Proxy corporativo:** si la salida obligatoria es por proxy HTTP, este patrón no funciona
-     tal cual (Envoy origina TLS directo). O excepción para el rango del NLB, o configurar el
-     egress gateway con upstream proxy. Definirlo antes de avanzar.
+3. **Conectividad y DNS — ✅ verificado el 2026-08-05.**
+   - Ruteo L3 a la VPC: el pod del origen conecta al NLB del destino en **182 ms**.
+   - `app2.paas-demo.bancogalicia.com.ar` resuelve al NLB tanto desde el bastión como desde
+     **CoreDNS**, que es el resolver que importa. Verificarlo siempre desde un pod: el del
+     bastión es otro y puede dar un resultado distinto.
+   - **Proxy corporativo:** no hay (`proxy/cluster` vacío), así que el patrón no se rediseña.
+     Si en otro entorno la salida fuera obligatoria por proxy HTTP, este diseño no funciona tal
+     cual — Envoy origina TLS directo — y hay que definirlo antes de avanzar.
 
 4. **Certificado.** El wildcard `*.paas-demo.bancogalicia.com.ar` cubre `app1` y `app2` (un
    solo nivel de subdominio), así que sirve el mismo cert del banco de los dos lados. Va como
    Secret TLS en el ns del Gateway de EKS. **No usar ACM**: si el balanceador terminara TLS, el
    origen validaría un certificado de Amazon y habría que cambiar la CA del `DestinationRule`
    (`origen/04`). Es una decisión válida, pero explícita.
+
+### 5.3bis. Destino alternativo: otro cluster OpenShift (`paas-dev1-lowmz`)
+
+Que el destino sea OpenShift en vez de EKS **no cambia nada del lado origen** —mismo FQDN,
+mismos claims, mismos manifiestos— y cambia una sola cosa del lado destino: cómo se
+publica el Gateway. Sin proveedor de LoadBalancer en vSphere IPI, entra por el **router
+HAProxy** con una Route de **`passthrough`**, que elige el backend por **SNI** y por lo
+tanto no se pelea con la decisión de no reescribir el `Host` (§4). Con `edge` o
+`reencrypt` el router rutearía por `Host` y daría 503 en el 100% del tráfico.
+
+Es además el camino con menos incógnitas abiertas: no depende de la clave pineada en EKS
+ni del pool de MetalLB, y ejercita por primera vez el **RTT entre sitios** y el **skew de
+reloj entre clusters**, que es el modo de falla del `exp: 300` que la simulación local no
+puede mostrar. El kit completo, con sus gates, está en
+[`destino-ocp/`](destino-ocp/README.md).
 
 ### 5.4. Placeholders a reemplazar
 
@@ -284,72 +320,33 @@ valores reales del cluster en `origen/06` y `origen/09`.
 
 ## 6. Orden de aplicación
 
-> **Este orden asume que el cluster destino EKS existe.** Hoy no existe. La Etapa A de abajo
-> aplica `origen/02`, `03` y `04` —los tres referencian `app2.paas-demo.bancogalicia.com.ar`— y
-> la Etapa B arranca por `fase0-espejo.yaml`, que espeja el 100% del tráfico contra ese host.
-> Para probar hasta el cutover inclusive sin EKS, ir directo a **§6.1**.
+Cinco etapas. **§6.1 es el procedimiento vigente y detallado**; lo de acá es el mapa.
 
-**Etapa 0 — smoke test.** Sin los cuatro pasos de
-[`00-smoke-wristband/`](00-smoke-wristband/README.md) en verde, no arrancar la etapa A: valida
-routing, enforcement de Kuadrant, emisión e inyección del wristband, y la verificación de la firma
-contra el JWKS que después se pinea en el destino.
+| Etapa | Qué pasa | Reversible |
+|---|---|---|
+| **0 — smoke** | los 4 pasos de [`00-smoke-wristband/`](00-smoke-wristband/README.md): routing, enforcement de Kuadrant, emisión del wristband y verificación de la firma. Corre en un solo cluster | borrar 3 objetos |
+| **A — preparación** | se monta el camino nuevo en paralelo. El `Service server2` sigue intacto: nada cambia para `server` | borrar lo aplicado |
+| **B — cutover** | el `Service` pasa a apuntar al gateway. **Dos pasos**: primero el selector, después la `AuthPolicy` — así se mide por separado el costo del Envoy y el de Authorino, y cada rollback es de un objeto | `patch` inverso, ~1 s |
+| **C — progresivo** | todo el reparto se controla desde el `HTTPRoute` (§6bis). El `Service` no se vuelve a tocar | `weight: 0` al remoto |
+| **D — cierre** | 100 % remoto estable N días → borrar el `Deployment server2` del origen | **punto de no retorno** |
 
-**Claves (una vez, desde el bastión):**
-```bash
-./keys/gen-signing-key.sh
-oc --context=origen apply -f keys/out/secret.yaml    # ns kuadrant-system, NO el ns de la app
-```
+**Para pasar al destino real** — que ya está desplegado, alcanzable y enforceando (§5.3, §7.6) —
+respecto de §6.1 cambian tres cosas y nada más:
 
-**Etapa A — preparación, cero impacto.** El `Service server2` sigue intacto apuntando a los
-pods reales; nada cambia para `server`.
+1. **Sincronizar la clave pública en el destino.** Es lo único que hoy impide cerrar el camino:
+   la que está pineada allá quedó de una versión anterior del par de firma. No depende del
+   origen — ver [`pedido-jwks-eks.md`](pedido-jwks-eks.md).
+2. En el `ServiceEntry` se **borra el bloque `endpoints`** y vuelve `resolution: DNS`
+   ([`sim-destino/06`](sim-destino/06-serviceentry-sim.yaml) queda idéntico a `origen/02`), y se
+   carga la cadena de la CA del destino en el Secret `destino-ca`.
+3. Se agrega la fase 0 de espejo, que hasta ahora no se pudo ejercitar.
 
-```bash
-# Destino (EKS) primero — requiere Istio + Gateway API + Kuadrant upstream (versión fijada)
-kubectl --context=eks apply -f destino/10-gateway-ingress.yaml
-# cargar el Secret TLS con el wildcard, y crear el CNAME app2 -> NLB (ver destino/10)
-# desplegar server2 (mismo manifiesto que en origen) en ns echoserver
-kubectl --context=eks apply -f destino/11-jwks-static.yaml            # con x/y del JWKS pegados
-kubectl --context=eks apply -f destino/12-httproute-server2.yaml
-kubectl --context=eks apply -f destino/13b-authpolicy-jwt-kuadrant.yaml
-kubectl --context=eks apply -f destino/14-ratelimitpolicy.yaml        # opcional
-#   Alternativa sin Kuadrant en EKS (menor huella, plano de políticas partido):
-#   kubectl --context=eks apply -f destino/13a-istio-jwt-validation.yaml   # y omitir 11 y 14
+Con destino en **otro OpenShift** ([`destino-ocp/`](destino-ocp/README.md)) los tres puntos
+son los mismos, con dos ventajas: la clave pineada la administramos nosotros, y el paso 2
+se puede diferir —el endpoint fijado a la ingress VIP valida todo el camino salvo la
+resolución del nombre, así que el corte del CNAME queda al final y no como prerrequisito.
 
-# Origen, sin tocar todavía el Service server2
-oc --context=origen apply -f origen/00-httproute-ingress-app1.yaml   # entrada por app1
-oc --context=origen apply -f origen/01-gateway-egress.yaml
-oc --context=origen apply -f origen/02-serviceentry-destino.yaml
-oc --context=origen apply -f origen/03-httproute-egress.yaml
-oc --context=origen apply -f origen/04-destinationrule-tls.yaml
-oc --context=origen apply -f origen/05-authpolicy-wristband.yaml
-oc --context=origen apply -f origen/06-service-server2-local.yaml
-oc --context=origen apply -f origen/07-networkpolicy.yaml
-```
-
-Validar la cadena completa a mano (§7.1). **Sin esto verde, no se sigue.**
-
-**Etapa B — cutover de la intercepción.** Dos pasos, ambos reversibles:
-
-```bash
-# 1) el HTTPRoute vuelve al backend local: el camino cambia, el destino todavía no
-oc --context=origen apply -f origen/08-rollout/fase0-espejo.yaml
-
-# 2) el Service pasa a apuntar al gateway (ver origen/09 para el patch exacto)
-oc --context=origen -n echoserver get svc server2 -o yaml > /tmp/server2-svc.bak.yaml
-oc --context=origen -n echoserver patch svc server2 --type merge -p \
-  '{"spec":{"selector":{"gateway.networking.k8s.io/gateway-name":"egress-gw"}}}'
-```
-
-Acá el 100% del tráfico entra al gateway y vuelve al `server2` local. Es el momento de
-verificar que el Envoy en el medio no rompió nada — latencia, headers, keep-alive, códigos de
-error — **antes de mover un solo request al otro cluster**.
-
-**Etapa C — progresivo.** §6bis.
-
-**Etapa D — cierre.** 100% remoto estable N días → escalar a 0 y borrar el `Deployment server2`
-del origen y el `Service server2-local`. Punto de no retorno.
-
-### 6.1. Variante sin cluster destino — la que aplica hoy (agosto 2026)
+### 6.1. Procedimiento vigente — sin cluster destino real
 
 Ejercita **toda la mecánica de intercepción hasta el cutover inclusive**, con el 100% del tráfico
 volviendo al `server2` local. Valida lo que no depende del destino: que un Envoy en el medio no
@@ -362,15 +359,12 @@ remoto. El cuarto sirve el 100% desde local pero cuelga un `RequestMirror` al de
 con backend inválido no tiene porción de tráfico que aislar, el error es a nivel de rule, y el
 riesgo es que se caiga la rule entera con el backend local adentro.
 
-**Dos trampas que condicionan las verificaciones de todo este camino:**
+**Dos trampas que condicionan las verificaciones de todo este camino** — detalle en
+[H4](HALLAZGOS.md#h4) y [H5](HALLAZGOS.md#h5):
 
-1. **El BFF manda el `Host` con puerto.** `urllib` arma `Host: server2.echoserver.svc.cluster.local:8080`
-   (verificado en la corrida local del BFF: el hop 2 recibió `host: 127.0.0.1:9002`). El listener
-   de `egress-gw` declara `hostname:` **sin** puerto, y todas las verificaciones históricas de este
-   repo curlean sin puerto. Si Istio no normaliza, son **404 en el 100% del tráfico real**. Gate en
-   la fase 1, cuesta 30 segundos.
-2. **`MIRROR_UPSTREAM_STATUS=false`** en el BFF: un 404 o un 503 del gateway salen como **HTTP 200**
-   hacia el bastión, con el error escondido en `.upstream.status`. Verificar siempre por
+1. El cliente manda el `Host` **con puerto** y el listener lo declara sin él. Gate en la fase 1,
+   cuesta 30 segundos.
+2. El BFF devuelve **HTTP 200** aunque el gateway haya dado 404 o 503. Verificar siempre por
    `.upstream.status`, **nunca** por `%{http_code}`.
 
 #### Fase 0 — pre-flight (read-only)
@@ -439,7 +433,7 @@ oc -n echoserver get httproute egress-server2 -o jsonpath='{.spec.rules[*].backe
 
 Si el assert dice `server2`, **parar**: post-cutover ese Service apunta a los pods del propio
 gateway y el loop es infinito, entre Envoy y kube-proxy, por debajo del `MAX_DEPTH` del BFF, con
-una firma ES256 por vuelta. Se detecta contando `incoming authorization request` en los logs de
+una firma RS256 por vuelta. Se detecta contando `incoming authorization request` en los logs de
 Authorino para un único curl.
 
 Después, el camino a mano con las dos formas del Host (§7.1).
@@ -568,12 +562,9 @@ oc apply   -n echoserver -f ../echoserver-cascada/00-configmap-bff.yaml
 oc replace -n echoserver --force -f ../echoserver-cascada/01-server-bff.yaml
 ```
 
-> **`replace --force`, no `apply`** — verificado en `paas-arqlab` (2026-08-04). La lista
-> `containers` mergea **por `name`**: si el `server` original no fue creado con `apply`, éste
-> no puede saber que el contenedor viejo sobra, así que **agrega `bff` y conserva
-> `echo-server`**. Los dos bindean `:8080` en el network namespace del pod y el segundo muere
-> con `EADDRINUSE` (`errno -98`, exit 1) → **CrashLoopBackOff**, con `bff` corriendo sano al
-> lado y el pod en `1/2`. Chequear que quedó un solo contenedor:
+> **`replace --force`, no `apply`.** La lista `containers` mergea por `name`, así que `apply`
+> sobre un Deployment preexistente **suma** el contenedor nuevo en vez de reemplazar — y los dos
+> se pelean el `:8080` ([H2](HALLAZGOS.md#h2)). Chequear que quedó uno solo:
 >
 > ```bash
 > oc -n echoserver get pod -l app=server \
@@ -599,15 +590,11 @@ for H in 'server2.echoserver.svc.cluster.local' 'server2.echoserver.svc.cluster.
 done
 ```
 
-> **Por qué las dos.** El cliente real —el BFF— llama a `http://server2...:8080`, y `urllib` arma
-> `Host: server2.echoserver.svc.cluster.local:8080` **con puerto**, porque no es el 80 (verificado
-> en la corrida local del BFF: el hop 2 recibió `host: 127.0.0.1:9002`). El listener de `egress-gw`
-> declara `hostname:` sin puerto. Si Istio no normaliza, la variante con `:8080` da **404** — y eso
-> es el 100% del tráfico real, mientras la verificación con Host pelado sigue en verde.
->
-> Si falla: quitar `hostname` del listener en `origen/01` y dejar el matching a las `hostnames` del
-> HTTPRoute, listando ahí las variantes que usen los clientes. El costo es que el gateway acepta
-> cualquier Host, y como la AuthPolicy es `anonymous`, el control queda sólo en la NetworkPolicy.
+> **Por qué las dos.** El cliente real manda el `Host` **con puerto** y el listener lo declara sin
+> él ([H4](HALLAZGOS.md#h4)). En este Istio funciona porque normaliza, pero si no lo hiciera serían
+> 404 en el 100% del tráfico real mientras la verificación con Host pelado sigue en verde. Si
+> falla: quitar `hostname` del listener en `origen/01` y dejar el matching a las `hostnames` del
+> HTTPRoute — a costa de que el gateway acepte cualquier Host.
 
 Esperado: **200 en las dos**, y en el cuerpo reflejado por el echo server que atienda —el del
 destino, o el local si se está corriendo §6.1— el header `x-egress-token` con un JWT. Con destino
@@ -644,9 +631,8 @@ for i in $(seq 1 30); do
 done | sort | uniq -c
 ```
 
-> **`.upstream.status`, nunca `%{http_code}`.** El BFF corre con `MIRROR_UPSTREAM_STATUS=false`:
-> un 404 o un 503 del gateway salen como **HTTP 200** hacia el bastión, con el error escondido
-> adentro del JSON. Un `curl -w '%{http_code}'` contra `app1` da verde con el cutover roto.
+> **`.upstream.status`, nunca `%{http_code}`.** Un 404 o un 503 del gateway salen como HTTP 200
+> hacia el bastión, con el error escondido en el JSON ([H5](HALLAZGOS.md#h5)).
 
 Tres señales que tienen que darse **juntas**:
 
@@ -662,17 +648,10 @@ el de Authorino.
 
 ### 7.3. Etapa C — reparto efectivo
 
-> **Corrección (2026-08-04).** La versión anterior de esta sección contaba pods con
-> `grep -o 'server2[a-z0-9-]*'` sobre la respuesta, dando por hecho que "el echo server
-> refleja el hostname del pod que atiende". **No lo hace.** Verificado contra
-> `ealen/echo-server:0.9.2`: `.host.hostname` es el **header `Host`** del request y
-> `.host.ip` es la **IP del cliente**. Como el request va con
-> `Host: server2.echoserver.svc.cluster.local`, ese `grep` matcheaba el propio Host y daba
-> 100 % "local" viniera la respuesta de donde viniera — el reparto se veía siempre correcto
-> aunque el canary estuviera roto.
->
-> El único dato del pod es `.environment.HOSTNAME`, que exige `ENABLE__ENVIRONMENT=true` en
-> el `server2` de **los dos** clusters (ver
+> **El pod que atendió sale de `.environment.HOSTNAME`, no de `.host.hostname`.** En echo-server
+> ese campo es el header `Host` y `.host.ip` es la IP del cliente: ninguno identifica al pod, y
+> contar por ahí daba 100 % "local" siempre ([H3](HALLAZGOS.md#h3)). Exige
+> `ENABLE__ENVIRONMENT=true` en el `server2` de **los dos** clusters (ver
 > [`echoserver-cascada/02-server2-echo.yaml`](../echoserver-cascada/02-server2-echo.yaml)).
 
 Con eso, el reparto se cuenta desde el bastión sin instrumentar nada:
@@ -723,6 +702,15 @@ probar el rollback de intercepción (`patch` del selector) y verificar lo mismo.
 Verde en §6.1 significa *"la intercepción local funciona y el token se emite"*. No significa nada
 de esto:
 
+> **Casi todo lo de abajo se puede destrabar sin EKS** con el destino simulado de
+> [`sim-destino/`](sim-destino/), que conserva el FQDN real y sólo le fija los `endpoints`
+> — así `origen/03`, `origen/04` y las cuatro fases de `08-rollout/` se aplican verbatim.
+> Queda afuera lo que depende del destino real: RTT, skew de reloj entre clusters y el
+> passthrough del NLB. **Estado 2026-08-05:** el cluster EKS está alcanzable desde un pod del
+> origen (182 ms), con el certificado válido y la política desplegada y enforceando — pero la
+> clave pública pineada allá quedó de una versión anterior y rechaza los tokens. Falta
+> sincronizarla ([`pedido-jwks-eks.md`](pedido-jwks-eks.md)); del lado origen no cambia nada.
+
 - **Todo el tramo remoto.** DNS de `app2` desde un pod, ruteo L3 a la VPC, RTT inter-cluster. Y el
   **proxy corporativo**: si la salida obligatoria es por proxy, este patrón no funciona tal cual y
   el egreso hay que rediseñarlo (`origen/02` §Pre-requisitos de red). Sigue siendo pregunta abierta.
@@ -744,7 +732,7 @@ de esto:
   `http.Transport` reutilizado) mantiene conexiones contra los pods viejos hasta que se cierren: la
   migración real va a tener una cola larga que esta PoC **no puede mostrar**.
 - **La capacidad.** 30 requests secuenciales no dicen nada sobre el dimensionamiento del gateway ni
-  sobre Authorino firmando ES256 bajo carga.
+  sobre Authorino firmando RS256 bajo carga.
 - **La publicación real de `app1` sin APIM.** Toda la validación entra por HTTP a IPs de nodo con
   `Host` forzado, porque el listener 443 de `gw-hostnet` sigue sin recibir el certificado por SDS
   (§5.2bis). Publicarlo de verdad exige resolver eso o terminar TLS en el F5 con pool a
@@ -759,6 +747,10 @@ de esto:
    `authentication.x509` / principal de Istio; o `kubernetesTokenReview` del SA token si se
    acepta tocar la app. Ese principal debe ir al claim `sub` del wristband, y el destino
    autorizar por `sub` en vez de por constantes.
+
+   > **Cuidado con el `sub` que ya aparece** en los tokens: lo agrega Authorino derivándolo de
+   > la identidad `anonymous`, así que parece un principal y no identifica a nadie
+   > ([H11](HALLAZGOS.md#h11)). No autorizar por él en el destino.
 2. **Rotación de la clave de firma.** `signingKeyRefs` acepta lista: se agrega la clave nueva, se
    publica el JWKS con ambas en el destino, se rota y se retira la vieja. Distribuir la privada
    con ESO/Vault (ver ADR-0004) hacia `kuadrant-system`, nunca en git.
@@ -770,14 +762,55 @@ de esto:
 4. **Observabilidad.** Métricas del gateway de egreso por backend + trazas con `traceparent`
    propagado, para poder responder "¿el 500 fue de `server2` o del salto entre clusters?".
    Es además el criterio de avance de las fases.
-5. **`aud` por destino.** Un `aud` distinto por servicio destino evita que un token emitido para
-   `server2` sirva contra otro backend del mismo gateway de ingreso.
-6. **Si se insiste con HMAC:** agregar un firmador propio (Deployment que lee el Secret y expone
+
+   > **`x-request-id` NO sirve para correlacionar entre clusters**: el gateway de egreso lo
+   > regenera ([H10](HALLAZGOS.md#h10)). Se resuelve con `traceparent` o con un `EnvoyFilter`
+   > que ponga `preserve_external_request_id: true`. Definirlo **antes** de que haya dos
+   > clusters, no después.
+5. **Subdominio privado y estrategia de tráfico east-west entre clusters.** Hoy el salto usa
+   `app2.paas-demo.bancogalicia.com.ar`: la zona de publicación de aplicaciones, con nombres de
+   laboratorio (`app1`/`app2`/`app3`) que no sobreviven a producción. Conviene una **zona interna
+   dedicada al tráfico este-oeste**, on-prem ↔ cloud.
+
+   *Por qué se puede sin costo de rediseño:* ese FQDN es un detalle interno del salto. Aparece
+   sólo en `origen/02` (`hosts`), `origen/04` (`host` y `sni`) y el `name` de los
+   `backendRef kind: Hostname`. **No viaja en ningún header** — el `Host` sigue siendo el nombre
+   interno del consumidor y el destino enruta por él (§4, confirmado en [H12](HALLAZGOS.md#h12)).
+   Sirve para resolver una IP y elegir un certificado, nada más.
+
+   *Por qué conviene:* no se mezclan clases de exposición —esto es máquina-a-máquina, sin
+   usuarios, alcanzable sólo desde otro cluster— y no se publican IPs privadas de la VPC en la
+   zona de aplicaciones. Además el nombre pasa a decir qué es.
+
+   *Qué hay que definir:*
+   - **Convención de nombres.** Un FQDN **por gateway de destino**, no por servicio: el ruteo
+     fino adentro ya lo hace el `Host` interno. Por ejemplo
+     `<cluster-destino>.egress.bancogalicia.com.ar`.
+   - **Certificados.** Es el requisito caro: el nombre elegido tiene que estar en el SAN del
+     certificado que presenta el destino, emitido por una CA que el origen confíe. Definir quién
+     los emite y cómo rotan.
+   - **Resolución.** Tiene que resolver desde **CoreDNS**, no desde el bastión. Y el registro
+     pasa a ser parte del contrato entre clusters: repuntarlo es un evento de migración.
+   - **Qué NO usar:** el nombre del NLB de AWS como SNI. Está en el SAN y ahorra crear el
+     registro, pero lo genera AWS y cambia si el balanceador se recrea — sería atar la
+     configuración del origen a un identificador que no controlamos.
+
+6. **`aud` por destino, y desacoplado del hostname.** Un `aud` distinto por servicio destino
+   evita que un token emitido para `server2` sirva contra otro backend del mismo gateway de
+   ingreso.
+
+   Hoy el `aud` **es** el FQDN, lo que ata el contrato del token al nombre de red: cambiar el
+   subdominio obliga a cambiar el `aud` en el origen y en la validación del destino, coordinado,
+   o todo pasa a dar 403. El `aud` no necesita ser un hostname — conviene un identificador
+   lógico del servicio (`server2.echoserver@eks`). Con eso el nombre de red queda libre: se puede
+   renombrar o mover de zona sin tocar el contrato de seguridad. **Hacer este cambio junto con el
+   punto 5**: es el mismo par de archivos y evita una segunda coordinación con el destino.
+7. **Si se insiste con HMAC:** agregar un firmador propio (Deployment que lee el Secret y expone
    `/token`), invocarlo desde `metadata.http` del `AuthPolicy` de egreso con `cache.ttl`, e
    inyectar el resultado con `plain.expression`. Validación en destino con `RequestAuthentication`
    + JWKS `oct`. Más piezas, el secreto replicado en ambos clusters, y sin la asimetría que hace
    seguro el esquema actual — por eso no es el default.
-7. **Multi-tenancy de la clave de firma — ver §8bis. Es una limitación abierta, no un pendiente
+8. **Multi-tenancy de la clave de firma — ver §8bis. Es una limitación abierta, no un pendiente
    menor: si no se resuelve, el patrón no es multi-tenant.**
 
 ## 8bis. Limitación abierta: dónde vive la clave de firma y quién puede usarla
@@ -863,7 +896,7 @@ self-service multi-equipo.
   03-authpolicy-denyall.yaml                   paso 2: ¿Kuadrant enforcea?
   04-authpolicy-wristband.yaml                 paso 3: firma e inyección del JWT
   check-token.py                               paso 4: claims, kid y firma (stdlib + openssl)
-keys/gen-signing-key.sh                        claves ES256 + Secret + JWKS
+keys/gen-signing-key.sh                        claves RSA/RS256 + Secret + JWKS
 origen/00-httproute-ingress-app1.yaml          entrada: app1 -> gw-hostnet -> server
 origen/01-gateway-egress.yaml                  Gateway de egreso HTTP:8080 (ns echoserver)
 origen/02-serviceentry-destino.yaml            registro del host remoto
@@ -885,6 +918,27 @@ destino/13b-authpolicy-jwt-kuadrant.yaml       OPCIÓN B (recomendada): Kuadrant
 destino/13a-istio-jwt-validation.yaml          OPCIÓN A: Istio, JWKS inline — menor huella
 destino/14-ratelimitpolicy.yaml                cuota por origen (Opción B, opcional)
 alternativas/interceptacion-externalname.yaml  fallback si los pods del gw no están en el ns
+pedido-jwks-eks.md                             lo que falta del lado EKS (clave pública)
+sim-destino/                                   DESTINO SIMULADO: migrar sin EKS (§7.6)
+  00-gen-certs.sh                              CA de lab + cert del FQDN real + los 2 Secrets
+  01-namespace-server2.yaml                    server2 "remoto" (marcado SIM_SITE=eks-sim)
+  02-gateway-sim.yaml                          Gateway HTTPS:443 que hace de NLB+Envoy de EKS
+  03-httproute-server2.yaml                    ruta al server2 remoto, sin hostnames
+  04-jwks-static.yaml                          JWKS pineado (el ConfigMap sale de keys/out/)
+  05-authpolicy-jwt.yaml                       validación del wristband del lado destino
+  06-serviceentry-sim.yaml                     ORIGEN: el FQDN real con endpoints fijados
+  run-escenarios.sh                            batería E0-E5, PASS/FALLA/SKIP; sirve para
+                                               los tres destinos (ver sus variables)
+destino-ocp/                                   DESTINO EN OTRO OPENSHIFT (paas-dev1-lowmz)
+  20-namespace-server2.yaml                    server2 remoto (marcado SIM_SITE=dev1-lowmz)
+  21-gateway-ingress.yaml                      Gateway HTTPS:443 ClusterIP + wildcard real
+  22-route-passthrough.yaml                    publicación por el router HAProxy — pieza nueva
+  23-httproute-server2.yaml                    ruta a server2, sin hostnames
+  24-jwks-static.yaml                          JWKS pineado, copiado del origen
+  25-authpolicy-jwt.yaml                       validación del wristband, claims sin cambios
+  26-serviceentry-origen.yaml                  ORIGEN: endpoint a la VIP, hasta mover el CNAME
+  27-reparar.sh                                diagnóstico en cadena, de abajo hacia arriba
+  preflight.sh                                 gates previos (L3, RHCL, cert, skew de reloj)
 ```
 
 Fuera de este directorio, pero requisito de la validación (§7.0):
