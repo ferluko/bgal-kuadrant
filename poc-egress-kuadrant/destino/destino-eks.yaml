@@ -1,0 +1,300 @@
+# PoC Kuadrant egress — recursos del cluster DESTINO (EKS), aplicados con kubectl.
+#
+# Antes vivían como kubectl_manifest en platform-gateway.tf; se movieron a YAML
+# plano porque Terraform no aporta nada gestionando objetos K8s de una PoC en
+# iteración activa (esperar wait_for_rollout en cada `apply`/`plan`, sin poder
+# iterar rápido sobre bugs de manifiesto). La plataforma (EKS, Istio, Kuadrant
+# operator, cert-manager, kuadrant-gateway) se sigue gestionando con Terraform.
+#
+# Aplicar: kubectl apply -f destino-eks.yaml
+# Requiere: namespace echoserver, Istio+Gateway API, Kuadrant operator — ya
+# desplegados por Terraform (platform-gateway.tf).
+#
+# Pendiente: Secret TLS "paas-demo-wildcard-tls" en ns echoserver (el listener
+# HTTPS de ingress-gw queda con ResolvedRefs=False hasta que exista).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: echoserver
+---
+# --- server2: Deployment + Service ------------------------------------------
+# ealen/echo-server:0.9.2 corre como root por defecto (sin USER no-root en su
+# Dockerfile) — runAsNonRoot:true lo tumba con CreateContainerConfigError
+# (verificado en este cluster). Se deja el resto del hardening.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server2
+  namespace: echoserver
+  labels:
+    app: server2
+    poc.galicia.io/rol: cascada-hop2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server2
+  template:
+    metadata:
+      labels:
+        app: server2
+        poc.galicia.io/rol: cascada-hop2
+    spec:
+      containers:
+        - name: echo-server
+          image: ealen/echo-server:0.9.2
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOGS__IGNORE__PING
+              value: "true"
+            - name: ENABLE__ENVIRONMENT
+              value: "true"
+            - name: ENABLE__FILE
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server2
+  namespace: echoserver
+  labels:
+    app: server2
+spec:
+  type: ClusterIP
+  selector:
+    app: server2
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# --- Gateway ingress-gw (HTTPS:443, NLB internal passthrough) ---------------
+# Listener sin hostname (catch-all): el origen NO reescribe el Host.
+# El Secret TLS (paas-demo-wildcard-tls) se carga manualmente aparte.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ingress-gw
+  namespace: echoserver
+  labels:
+    kuadrant.io/gateway: "true"
+  annotations:
+    networking.istio.io/service-type: LoadBalancer
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: paas-demo-wildcard-tls
+---
+# --- JWKS estático (ConfigMap + httpd + Service) -----------------------------
+# Authorino no acepta JWKS inline; se sirve desde un httpd local.
+# 2026-08-05: clave rotada por Plataforma (origen regeneró el par de firma,
+# ahora RSA/RS256 en vez de EC/ES256 — mismo kid egress-echoserver-1, ver
+# pedido "actualizar la clave pública pineada en el cluster EKS").
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jwks-egress-origen
+  namespace: echoserver
+data:
+  jwks.json: |
+    {"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"egress-echoserver-1","n":"xXLdalTSEBAbGKcGLKvgv1WlU28Xb4u-psX5NoTuNKU-oW6gQtIA3cta5INwbHXKXHiGsTrDUkG6mUfKYrsJqgUrCpxBgr3oSe4YICb_fmPX3sDr_WgDbBfzC8LmOj73OkTg6MS7SfPFftI54zbLDPXHRW3VozVY0E-FxR8Ye6R7kKuQDBBfvQIn3cHeuhLuTb4__pw3bn5hwzgIIPqqQb5pWOrNemAvMPlvECkZ0ey2AsAfWgGzN636wrLM_DfbxWbfPBiPcKo97E1_4IxA0EUU_4P3uPxiNA-cMShc1tlyVCEQ9hocvIV9lrvA4a8FRVbNuTUAb6PDNdCnjXMgtw","e":"AQAB"}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwks-egress
+  namespace: echoserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jwks-egress
+  template:
+    metadata:
+      labels:
+        app: jwks-egress
+    spec:
+      containers:
+        - name: httpd
+          image: registry.access.redhat.com/ubi9/httpd-24:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: jwks
+              mountPath: /var/www/html
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /jwks.json
+              port: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: jwks
+          configMap:
+            name: jwks-egress-origen
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwks-egress
+  namespace: echoserver
+spec:
+  selector:
+    app: jwks-egress
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# --- HTTPRoute server2 ------------------------------------------------------
+# El hostname es el FQDN interno que llega sin reescribir desde el origen.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: server2
+  namespace: echoserver
+spec:
+  parentRefs:
+    - name: ingress-gw
+      sectionName: https
+  hostnames:
+    - server2.echoserver.svc.cluster.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: server2
+          port: 8080
+---
+# --- AuthPolicy: validación JWT + autorización por claims --------------------
+# Sin x-egress-token válido → 401. Con token válido pero claims incorrectos → 403.
+# credentials.customHeader sólo acepta `name` en Kuadrant 1.4.2 (el manifiesto
+# original traía también `prefix`, que el CRD instalado rechaza con strict
+# decoding error — puede ser un campo de una versión de RHCL distinta).
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: server2-ingress-jwt
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: server2
+  rules:
+    authentication:
+      egress-wristband:
+        jwt:
+          jwksUrl: http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+    authorization:
+      claims-esperados:
+        patternMatching:
+          patterns:
+            - predicate: 'auth.identity.iss == "https://egress.paas-arqlab.bancogalicia.com.ar"'
+            - predicate: 'auth.identity.aud == "app2.paas-demo.bancogalicia.com.ar"'
+            - predicate: 'auth.identity.src_cluster == "paas-arqlab"'
+            - predicate: 'auth.identity.src_namespace == "echoserver"'
+            - predicate: 'auth.identity.dst_service == "server2"'
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de server2"
+      success:
+        headers:
+          x-forwarded-src-cluster:
+            plain:
+              expression: auth.identity.src_cluster
+          x-forwarded-src-namespace:
+            plain:
+              expression: auth.identity.src_namespace
+---
+# --- RateLimitPolicy: cuota por origen (opcional) ----------------------------
+# Contador por src_cluster/src_namespace, usando los claims del JWT.
+# counters es []object con `expression`, no []string (schema real de
+# Kuadrant 1.4.2 — el manifiesto original con string plano falla la validación
+# del CRD).
+# 2026-08-06: el operador traduce cada `expression` al Limitador CR pegando el
+# string tal cual dentro de descriptors[0]["..."] sin escapar comillas
+# internas. Una sola expression con `+ "/" +` generaba una clave con comillas
+# mal anidadas -> CEL evaluation error en cada request (ver istio-proxy logs).
+# Fix: dos counters separados (src_cluster, src_namespace), sin literales de
+# string embebidos — Limitador arma la clave compuesta solo.
+apiVersion: kuadrant.io/v1
+kind: RateLimitPolicy
+metadata:
+  name: server2-rlp
+  namespace: echoserver
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: server2
+  limits:
+    por-origen:
+      rates:
+        - limit: 1000
+          window: 300s
+      counters:
+        - expression: 'auth.identity.src_cluster'
+        - expression: 'auth.identity.src_namespace'
