@@ -1,12 +1,12 @@
 # Cluster DESTINO — ruta hacia el backend ya migrado.
 #
 # Asume que backend (Deployment + Service ClusterIP:8080) fue desplegado igual
-# que en el origen, en el ns echoserver de este cluster.
+# que en el origen, en el ns poc-egress-kuadrant de este cluster.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: backend
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   parentRefs:
     - name: ingress-gw
@@ -25,5 +25,5 @@ spec:
           port: 8080
 ---
 # Verificación:
-#   oc -n echoserver get httproute backend \
+#   oc -n poc-egress-kuadrant get httproute backend \
 #     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'

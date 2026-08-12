@@ -94,24 +94,31 @@ al hop 1.
 
 ## 3. Desplegar
 
-Respaldar primero el `bff` actual, si existe:
+El despliegue vive en el namespace dedicado `poc-egress-kuadrant`. Crearlo primero:
 
 ```bash
-oc -n poc-egress-kuadrant get deploy bff -o yaml > /tmp/bff-deploy.bak.yaml
+oc apply -f 00-namespace.yaml
 ```
 
 ConfigMap y `backend` van con `apply` sin vueltas:
 
 ```bash
-oc apply -n poc-egress-kuadrant -f 00-configmap-bff.yaml -f 02-backend-echo.yaml
+oc apply -n poc-egress-kuadrant -f 01-configmap-bff.yaml -f 03-backend-echo.yaml
 ```
 
-**`bff` NO va con `apply` si ya existe** — usar `replace --force`:
+En un namespace nuevo, crear el BFF con `apply`:
 
 ```bash
-oc -n poc-egress-kuadrant replace --force -f 01-bff.yaml
+oc apply -n poc-egress-kuadrant -f 02-bff.yaml
 ```
 
+> Si se reemplaza un Deployment `bff` ya existente, respaldarlo y usar `replace --force`:
+>
+> ```bash
+> oc -n poc-egress-kuadrant get deploy bff -o yaml > /tmp/bff-deploy.bak.yaml
+> oc -n poc-egress-kuadrant replace --force -f 02-bff.yaml
+> ```
+>
 > **Por qué, verificado en `paas-arqlab` (2026-08-04).** En la lista `containers` la
 > estrategia de merge es **por `name`**. Si el `bff` original no fue creado con `apply`
 > (no tiene la anotación `kubectl.kubernetes.io/last-applied-configuration`), `oc apply` no
@@ -136,7 +143,7 @@ config con la que se probó — en particular `PORT=8080`, que **no es cosmétic
 de la imagen es 80 y bajo `restricted-v2` (UID arbitrario) no puede bindear puerto
 privilegiado.
 
-Para 3+ niveles, `03-server3-cascada-n-niveles.yaml`: el mismo ConfigMap sirve para
+Para 3+ niveles, `optional/03-server3-cascada-n-niveles.yaml`: el mismo ConfigMap sirve para
 cualquier hop, encadenando por `UPSTREAM_URL` y anidando en `.upstream.body.upstream.body`.
 
 ## 4. Probar
@@ -186,7 +193,7 @@ curl -s -H 'Host: bff.paas-demo.bancogalicia.com.ar' http://10.254.28.68/api/ped
 > identifica al pod que atendió — con `Host: backend.poc-egress-kuadrant.svc.cluster.local` el campo
 > `hostname` devuelve ese FQDN venga la respuesta del pod local o del cluster remoto. El
 > único dato del pod es `.environment.HOSTNAME`, y sólo aparece con `ENABLE__ENVIRONMENT=true`
-> (por eso `02-backend-echo.yaml` lo pone en `true`). Atajo equivalente:
+> (por eso `03-backend-echo.yaml` lo pone en `true`). Atajo equivalente:
 > `curl -H 'X-ECHO-ENV-BODY: HOSTNAME'` devuelve sólo el hostname como body.
 >
 > `.host.ip` sí es útil en la PoC de egreso, pero por otra razón: es la **IP de origen tal

@@ -1,26 +1,26 @@
 # Pedido: actualizar la clave pública pineada en el cluster EKS
 
-**Para:** quien administra el cluster EKS de la PoC (ns `echoserver`).
+**Para:** quien administra el cluster EKS de la PoC (ns `poc-egress-kuadrant`).
 **De:** Plataforma — PoC de egreso `paas-arqlab` → EKS.
 **Fecha:** 2026-08-05.
 
 ## Qué hace falta
 
-Reemplazar el contenido del ConfigMap **`jwks-egress-origen`** del namespace **`echoserver`**
+Reemplazar el contenido del ConfigMap **`jwks-egress-origen`** del namespace **`poc-egress-kuadrant`**
 por el archivo adjunto `jwks.json`, y forzar que Authorino lo vuelva a leer.
 
 Es una **clave pública** (JWKS). No es material sensible: se puede mandar por cualquier canal.
 
 ```bash
-kubectl -n echoserver create configmap jwks-egress-origen \
+kubectl -n poc-egress-kuadrant create configmap jwks-egress-origen \
   --from-file=jwks.json=./jwks.json --dry-run=client -o yaml | kubectl apply -f -
 
 # Authorino cachea el JWKS; recrear la AuthPolicy fuerza el refetch
-kubectl -n echoserver delete authpolicy backend-ingress-jwt
-kubectl -n echoserver apply -f <el manifiesto de la AuthPolicy>
+kubectl -n poc-egress-kuadrant delete authpolicy backend-ingress-jwt
+kubectl -n poc-egress-kuadrant apply -f <el manifiesto de la AuthPolicy>
 
 # y confirmar que quedó lista antes de mandar tráfico
-kubectl -n echoserver get authpolicy backend-ingress-jwt \
+kubectl -n poc-egress-kuadrant get authpolicy backend-ingress-jwt \
   -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status} {.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
 ```
 
@@ -79,7 +79,7 @@ O sea que **lo único que falta para cerrar el camino de punta a punta es esta c
 
 ## Un pendiente aparte, para la misma ventana
 
-El Secret **`destino-ca`** en el namespace `echoserver` del cluster **origen** necesita la cadena
+El Secret **`destino-ca`** en el namespace `poc-egress-kuadrant` del cluster **origen** necesita la cadena
 de la CA que emite el certificado del destino: `CA NoProd Intermedia Banco Galicia`. Sin ella, el
 `DestinationRule` no puede validar la cadena TLS y hay que dejarlo con `insecureSkipVerify`, que
 no es aceptable fuera del laboratorio.
