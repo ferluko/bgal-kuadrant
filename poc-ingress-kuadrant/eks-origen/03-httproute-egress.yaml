@@ -1,0 +1,45 @@
+# Cluster ORIGEN (EKS) — ruta de egreso (estado base: 100% al cluster destino).
+#
+# Mismo patrón que poc-egress-kuadrant/origen/03, roles invertidos.
+#
+# NO hay filtro URLRewrite del Host, a propósito — mismo motivo documentado del
+# otro lado (istio#39136: no hay filtros a nivel de backendRef, y con dos
+# backends en la rule un filtro a nivel rule aplicaría a los dos). El Host
+# viaja sin reescribir; el gateway del destino (gw-hostnet) acepta el hostname
+# interno porque su listener tampoco declara hostname. El SNI lo fija el
+# DestinationRule (04), independiente del header Host.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-backend
+  namespace: poc-ingress-kuadrant
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "backend"
+    - "backend.poc-ingress-kuadrant"
+    - "backend.poc-ingress-kuadrant.svc"
+    - "backend.poc-ingress-kuadrant.svc.cluster.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # backendRef a un host externo: extensión de Istio para Gateway API.
+        - group: networking.istio.io
+          kind: Hostname
+          name: "<destination-fqdn-ocp>"
+          port: 443
+---
+# Verificación:
+#   kubectl -n poc-ingress-kuadrant get httproute egress-backend \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
+#
+# Si el controller rechaza `kind: Hostname` como backendRef (no debería en
+# Istio upstream reciente, pero confirmarlo — es distinto del istiod gestionado
+# de OCP donde sí está probado), el fallback es un Service ExternalName hacia
+# el FQDN del destino.

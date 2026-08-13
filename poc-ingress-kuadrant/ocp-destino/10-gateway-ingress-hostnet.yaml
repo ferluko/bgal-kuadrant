@@ -1,0 +1,108 @@
+# Cluster DESTINO (OCP, paas-arqlab) — Gateway de ingreso que recibe el
+# tráfico migrado desde EKS.
+#
+# A diferencia de poc-egress-kuadrant/destino/10-gateway-ingress.yaml (donde el
+# destino es EKS y `class: istio` alcanza sin nada especial), acá el destino es
+# OCP y su GatewayClass gestionada (`openshift-default`) NO puede hacer
+# hostNetwork ni pod placement manual (runbook §1) — necesaria para publicar
+# por F5 sobre nodos infra dedicados sin pasar por HAProxy. Por eso se usa el
+# Gateway `gw-hostnet` / class `ingress-hostnet` que documenta
+# ../runbook-gw-istio-hostnetwork.md — NO es un manifiesto nuevo, es la
+# integración de ese runbook con esta PoC.
+#
+# LEER EL RUNBOOK COMPLETO ANTES DE APLICAR. Este archivo cubre únicamente la
+# parte declarativa (Gateway + Service, §4.2, y el listener HTTPS, §7.1). Todo
+# lo demás — namespace/SA/SCC (§4.1), el DaemonSet hostNetwork con el
+# workaround de render-extract-transform por el problema de `image: auto`
+# (§4.3-4.4), el sysctl de puertos privilegiados (§2.4) y la publicación por F5
+# (§8) — es procedimiento manual, no un manifiesto que se pueda `apply` solo.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: connlink-ingress
+---
+# --- Gateway + Service base (HTTP:80) — runbook §4.2 -----------------------
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gw-hostnet
+  namespace: connlink-ingress
+  labels:
+    kuadrant.io/gateway: "true"
+spec:
+  gatewayClassName: ingress-hostnet
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # CRÍTICO (runbook §4.2): Istio busca el Service como <gateway>-<gatewayclass>.
+  # Con otro nombre el Gateway queda Programmed=False/AddressNotUsable y NO se
+  # genera el listener de datos.
+  name: gw-hostnet-ingress-hostnet
+  namespace: connlink-ingress
+  labels:
+    istio.io/gateway-name: gw-hostnet
+    gateway.networking.k8s.io/gateway-name: gw-hostnet
+spec:
+  selector:
+    gateway.networking.k8s.io/gateway-name: gw-hostnet
+  ports:
+    - name: status-port
+      port: 15021
+      targetPort: 15021
+      appProtocol: tcp
+    - name: http
+      port: 80
+      targetPort: 80
+      appProtocol: http
+---
+# --- Listener HTTPS:443 — runbook §7.1 (agregado aparte, no en la creación) -
+#
+# DEPENDE DE QUE SE RESUELVA EL BLOQUEO DEL RUNBOOK §7.2: Envoy pide el cert
+# por SDS y nunca lo recibe (`cross namespace secret reference requires
+# ReferenceGrant`, aunque Gateway y Secret están en el mismo namespace — es un
+# hallazgo abierto, no un error de configuración de este manifiesto). Estado
+# documentado como ❌ bloqueado en el runbook §10 al momento de escribir esto.
+#
+# Si el §7.2 sigue sin resolverse cuando toque implementar esto: usar el
+# workaround del runbook §7.3 (terminar TLS en el F5, dejar el Gateway sólo en
+# HTTP:80, pool F5 apuntando a <IPs de nodo>:80) — las AuthPolicy/RateLimitPolicy
+# de Kuadrant siguen operando igual sobre el Gateway/HTTPRoute, no dependen de
+# dónde se termina el TLS.
+#
+# Puerto 443 en el Service (si falta, no hay listener — mismo mecanismo que el 80):
+#   oc -n connlink-ingress patch svc gw-hostnet-ingress-hostnet --type=json \
+#     -p '[{"op":"add","path":"/spec/ports/-","value":{"name":"https","port":443,"targetPort":443,"protocol":"TCP","appProtocol":"https"}}]'
+#
+# Listener HTTPS (patch, no en la creación inicial — runbook §7.1):
+#   oc -n connlink-ingress patch gateway gw-hostnet --type=json \
+#     -p '[{"op":"add","path":"/spec/listeners/-","value":{"name":"https","port":443,"protocol":"HTTPS","tls":{"mode":"Terminate","certificateRefs":[{"kind":"Secret","name":"paas-demo-wildcard-tls"}]},"allowedRoutes":{"namespaces":{"from":"All"}}}}]'
+#
+# SIN hostname en el listener, a propósito — mismo motivo que destino/10 del
+# otro sentido: el origen (EKS) no reescribe el Host, así que el request llega
+# con Host: backend.poc-ingress-kuadrant.svc.cluster.local. Verificar los SAN
+# del certificado ANTES: un wildcard *.foo no matchea foo pelado (runbook
+# §7.1) — usar el mismo cert wildcard multi-SAN que ya se validó del otro lado.
+#
+# Certificado — mismo Secret/cadena que se resolvió para el Gateway de EKS
+# (hoja + intermedia, sin el root, orden hoja->intermedia):
+#   oc -n connlink-ingress create secret tls paas-demo-wildcard-tls \
+#     --cert=fullchain.crt --key=app.paas-demo.bancogalicia.com.ar.key
+#
+# Verificación de que el cert LLEGÓ al proxy — ResolvedRefs=True NO lo prueba
+# (runbook §7.2), el único indicador confiable es dynamic_active_secrets:
+#   oc -n connlink-ingress exec ds/gw-hostnet -c istio-proxy -- \
+#     pilot-agent request GET config_dump | python3 -c '
+#   import json,sys
+#   d=json.load(sys.stdin)
+#   for c in d["configs"]:
+#       if "SecretsConfigDump" in c.get("@type",""):
+#           print("activos:", [s.get("name") for s in c.get("dynamic_active_secrets",[])])
+#   '

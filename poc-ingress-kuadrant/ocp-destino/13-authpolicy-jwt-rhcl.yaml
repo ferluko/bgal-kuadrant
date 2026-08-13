@@ -1,0 +1,74 @@
+# Cluster DESTINO (OCP) — validación del JWT con RHCL.
+#
+# Mismo patrón que poc-egress-kuadrant/destino/13b-authpolicy-jwt-kuadrant.yaml,
+# roles invertidos. A diferencia de la versión que quedó adaptada para
+# Kuadrant 1.4.2 en EKS (bgal-kuadrant/poc-egress-kuadrant/destino/destino-eks.yaml,
+# donde tuvimos que sacar `credentials.customHeader.prefix` porque ese CRD lo
+# rechaza con strict decoding error), ESTE archivo corre contra RHCL 1.3 en
+# OCP, que sí lo acepta — mismo schema que el original antes de nuestro fix.
+# NO copiar el AuthPolicy de destino-eks.yaml tal cual; son versiones de
+# operador distintas con schemas distintos, ya lo confirmamos empíricamente
+# una vez.
+#
+# Sin header x-egress-token válido -> 401. Con token válido pero claims que no
+# corresponden a este consumidor -> 403.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: backend-ingress-jwt
+  namespace: poc-ingress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: backend
+  rules:
+    authentication:
+      "egress-wristband":
+        jwt:
+          jwksUrl: http://jwks-egress-eks.poc-ingress-kuadrant.svc.cluster.local:8080/jwks.json
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+            prefix: ""
+    authorization:
+      "claims-esperados":
+        patternMatching:
+          patterns:
+            - predicate: |
+                auth.identity.iss == "https://egress.<source-cluster-eks>.bancogalicia.com.ar"
+            - predicate: |
+                auth.identity.aud == "<destination-fqdn-ocp>"
+            - predicate: |
+                auth.identity.src_cluster == "<source-cluster-eks>"
+            - predicate: |
+                auth.identity.src_namespace == "poc-ingress-kuadrant"
+            - predicate: |
+                auth.identity.dst_service == "backend"
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de backend"
+      success:
+        headers:
+          "x-forwarded-src-cluster":
+            plain:
+              expression: auth.identity.src_cluster
+          "x-forwarded-src-namespace":
+            plain:
+              expression: auth.identity.src_namespace
+---
+# Verificación:
+#   oc -n poc-ingress-kuadrant get authpolicy backend-ingress-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Placeholders a reemplazar antes de aplicar:
+#   <source-cluster-eks>   — identificador del cluster EKS origen (p.ej. devops-cilium-1-35)
+#   <destination-fqdn-ocp> — FQDN público/corporativo de gw-hostnet
+# Tienen que coincidir EXACTO con los mismos valores en
+# ../eks-origen/05-authpolicy-wristband.yaml — son comparación por `==`
+# estricta, no hay normalización de ningún lado.

@@ -1,0 +1,44 @@
+# Cluster DESTINO (OCP) — opcional. Cuota por origen, usando los claims del JWT.
+#
+# Mismo patrón que poc-egress-kuadrant/destino/14-ratelimitpolicy.yaml, roles
+# invertidos.
+#
+# OJO — bug real ya encontrado y arreglado del otro lado (ver destino-eks.yaml,
+# comentario 2026-08-06): el operador de Kuadrant traduce cada `expression` al
+# Limitador CR pegando el string TAL CUAL dentro de descriptors[0]["..."] sin
+# escapar comillas internas. La forma original de acá abajo
+# (`auth.identity.src_cluster + "/" + auth.identity.src_namespace`, un solo
+# counter con un literal de string embebido) genera una clave con comillas mal
+# anidadas -> CEL evaluation error en CADA request, autenticado o no.
+#
+# Esto se descubrió en Kuadrant 1.4.2 (EKS). Verificar si RHCL 1.3 tiene el
+# mismo bug antes de asumir que hace falta el mismo workaround — si lo tiene,
+# usar dos counters separados como en destino-eks.yaml en vez de la
+# concatenación con "/" de abajo.
+apiVersion: kuadrant.io/v1
+kind: RateLimitPolicy
+metadata:
+  name: backend-rlp
+  namespace: poc-ingress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: backend
+  limits:
+    "por-origen":
+      rates:
+        - limit: 100
+          window: 10s
+      counters:
+        # SI aparece el mismo CEL evaluation error que en EKS, reemplazar por:
+        #   counters:
+        #     - expression: 'auth.identity.src_cluster'
+        #     - expression: 'auth.identity.src_namespace'
+        - expression: auth.identity.src_cluster + "/" + auth.identity.src_namespace
+---
+# Verificación de que el contador evalúa sin error (buscar en los logs del
+# istio-proxy del Gateway):
+#   oc -n connlink-ingress logs ds/gw-hostnet -c istio-proxy --since=1m | grep -i "CEL evaluation error"
+#
+# Para la demo de 429, bajar limit a 5 y disparar 6 requests en <10s.

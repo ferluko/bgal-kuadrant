@@ -7,38 +7,38 @@
 # operator, cert-manager, kuadrant-gateway) se sigue gestionando con Terraform.
 #
 # Aplicar: kubectl apply -f destino-eks.yaml
-# Requiere: namespace echoserver, Istio+Gateway API, Kuadrant operator — ya
+# Requiere: namespace poc-egress-kuadrant, Istio+Gateway API, Kuadrant operator — ya
 # desplegados por Terraform (platform-gateway.tf).
 #
-# Pendiente: Secret TLS "paas-demo-wildcard-tls" en ns echoserver (el listener
+# Pendiente: Secret TLS "paas-demo-wildcard-tls" en ns poc-egress-kuadrant (el listener
 # HTTPS de ingress-gw queda con ResolvedRefs=False hasta que exista).
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: echoserver
+  name: poc-egress-kuadrant
 ---
-# --- server2: Deployment + Service ------------------------------------------
+# --- backend: Deployment + Service ------------------------------------------
 # ealen/echo-server:0.9.2 corre como root por defecto (sin USER no-root en su
 # Dockerfile) — runAsNonRoot:true lo tumba con CreateContainerConfigError
 # (verificado en este cluster). Se deja el resto del hardening.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: server2
-  namespace: echoserver
+  name: backend
+  namespace: poc-egress-kuadrant
   labels:
-    app: server2
+    app: backend
     poc.galicia.io/rol: cascada-hop2
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: server2
+      app: backend
   template:
     metadata:
       labels:
-        app: server2
+        app: backend
         poc.galicia.io/rol: cascada-hop2
     spec:
       containers:
@@ -81,14 +81,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: server2
-  namespace: echoserver
+  name: backend
+  namespace: poc-egress-kuadrant
   labels:
-    app: server2
+    app: backend
 spec:
   type: ClusterIP
   selector:
-    app: server2
+    app: backend
   ports:
     - name: server-port
       port: 8080
@@ -102,7 +102,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: ingress-gw
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     kuadrant.io/gateway: "true"
   annotations:
@@ -135,7 +135,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: jwks-egress-origen
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 data:
   jwks.json: |
     {"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"egress-echoserver-1","n":"xXLdalTSEBAbGKcGLKvgv1WlU28Xb4u-psX5NoTuNKU-oW6gQtIA3cta5INwbHXKXHiGsTrDUkG6mUfKYrsJqgUrCpxBgr3oSe4YICb_fmPX3sDr_WgDbBfzC8LmOj73OkTg6MS7SfPFftI54zbLDPXHRW3VozVY0E-FxR8Ye6R7kKuQDBBfvQIn3cHeuhLuTb4__pw3bn5hwzgIIPqqQb5pWOrNemAvMPlvECkZ0ey2AsAfWgGzN636wrLM_DfbxWbfPBiPcKo97E1_4IxA0EUU_4P3uPxiNA-cMShc1tlyVCEQ9hocvIV9lrvA4a8FRVbNuTUAb6PDNdCnjXMgtw","e":"AQAB"}]}
@@ -144,7 +144,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jwks-egress
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   replicas: 2
   selector:
@@ -189,7 +189,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: jwks-egress
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   selector:
     app: jwks-egress
@@ -198,26 +198,26 @@ spec:
       port: 8080
       targetPort: 8080
 ---
-# --- HTTPRoute server2 ------------------------------------------------------
+# --- HTTPRoute backend ------------------------------------------------------
 # El hostname es el FQDN interno que llega sin reescribir desde el origen.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: server2
-  namespace: echoserver
+  name: backend
+  namespace: poc-egress-kuadrant
 spec:
   parentRefs:
     - name: ingress-gw
       sectionName: https
   hostnames:
-    - server2.echoserver.svc.cluster.local
+    - backend.poc-egress-kuadrant.svc.cluster.local
   rules:
     - matches:
         - path:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: server2
+        - name: backend
           port: 8080
 ---
 # --- AuthPolicy: validación JWT + autorización por claims --------------------
@@ -228,18 +228,18 @@ spec:
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
-  name: server2-ingress-jwt
-  namespace: echoserver
+  name: backend-ingress-jwt
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: server2
+    name: backend
   rules:
     authentication:
       egress-wristband:
         jwt:
-          jwksUrl: http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+          jwksUrl: http://jwks-egress.poc-egress-kuadrant.svc.cluster.local:8080/jwks.json
           ttl: 300
         credentials:
           customHeader:
@@ -251,15 +251,15 @@ spec:
             - predicate: 'auth.identity.iss == "https://egress.paas-arqlab.bancogalicia.com.ar"'
             - predicate: 'auth.identity.aud == "app2.paas-demo.bancogalicia.com.ar"'
             - predicate: 'auth.identity.src_cluster == "paas-arqlab"'
-            - predicate: 'auth.identity.src_namespace == "echoserver"'
-            - predicate: 'auth.identity.dst_service == "server2"'
+            - predicate: 'auth.identity.src_namespace == "poc-egress-kuadrant"'
+            - predicate: 'auth.identity.dst_service == "backend"'
     response:
       unauthenticated:
         message:
           value: "falta o es invalido el token de egreso (x-egress-token)"
       unauthorized:
         message:
-          value: "el token de egreso no corresponde a un consumidor habilitado de server2"
+          value: "el token de egreso no corresponde a un consumidor habilitado de backend"
       success:
         headers:
           x-forwarded-src-cluster:
@@ -283,13 +283,13 @@ spec:
 apiVersion: kuadrant.io/v1
 kind: RateLimitPolicy
 metadata:
-  name: server2-rlp
-  namespace: echoserver
+  name: backend-rlp
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: server2
+    name: backend
   limits:
     por-origen:
       rates:

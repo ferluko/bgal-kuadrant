@@ -1,0 +1,60 @@
+# Cluster ORIGEN (EKS) — EL CUTOVER DE LA INTERCEPCIÓN. Aplicar ÚLTIMO.
+#
+# Mismo patrón que poc-egress-kuadrant/origen/09, roles invertidos. El Service
+# `backend` NO se recrea: se le cambia el `selector` in-place para que sus
+# endpoints pasen a ser los pods del gateway de egreso en lugar de los pods de
+# la app. La ClusterIP no cambia, el nombre DNS no cambia, el puerto no
+# cambia. El Deployment `backend` NO se toca: sigue corriendo y sirviendo a
+# través del Service `backend-local` (06).
+#
+# Para el cliente `bff` no cambió nada: misma URL, misma IP, mismo puerto.
+#
+# PRECONDICIONES:
+#   1. Cadena de egreso probada a mano end-to-end (equivalente al README §7.1
+#      de poc-egress-kuadrant, con los roles invertidos).
+#   2. 06-service-backend-local.yaml aplicado y con los mismos endpoints que
+#      backend.
+#   3. Confirmar que los pods del gateway (egress-gw) llevan la label
+#      gateway.networking.k8s.io/gateway-name — comprobado que Istio upstream
+#      la pone de fábrica (no es la variante gestionada de OCP), pero
+#      verificarlo antes de dar el patch por bueno:
+#      kubectl -n poc-ingress-kuadrant get pods -l gateway.networking.k8s.io/gateway-name=egress-gw
+#
+# FORMA RECOMENDADA DE APLICARLO — patch de un campo, con backup:
+#
+#   kubectl -n poc-ingress-kuadrant get svc backend -o yaml > /tmp/backend-svc.bak.yaml
+#   kubectl -n poc-ingress-kuadrant patch svc backend --type merge -p \
+#     '{"spec":{"selector":{"gateway.networking.k8s.io/gateway-name":"egress-gw"}}}'
+#
+# ROLLBACK — un patch, ~1 segundo, los pods reales nunca se detuvieron:
+#
+#   kubectl -n poc-ingress-kuadrant patch svc backend --type merge -p \
+#     '{"spec":{"selector":{"app":"backend"}}}'
+#
+# ---------------------------------------------------------------------------
+# Representación declarativa del estado final del Service, para GitOps.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: poc-ingress-kuadrant
+  annotations:
+    poc.galicia.io/intercepcion: "egress-gw"
+    poc.galicia.io/rollback: 'kubectl -n poc-ingress-kuadrant patch svc backend --type merge -p ''{"spec":{"selector":{"app":"backend"}}}'''
+spec:
+  type: ClusterIP
+  # ÚNICO cambio funcional respecto del Service original.
+  selector:
+    gateway.networking.k8s.io/gateway-name: egress-gw
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Verificación inmediata:
+#   kubectl -n poc-ingress-kuadrant get svc backend -o jsonpath='{.spec.clusterIP}{"\n"}'
+#   kubectl -n poc-ingress-kuadrant get endpointslice -l kubernetes.io/service-name=backend \
+#     -o jsonpath='{.items[*].endpoints[*].targetRef.name}{"\n"}'
+#   kubectl -n poc-ingress-kuadrant exec deploy/bff -- \
+#     curl -s -o /dev/null -w '%{http_code}\n' http://backend.poc-ingress-kuadrant.svc.cluster.local:8080/

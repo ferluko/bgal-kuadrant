@@ -1,0 +1,87 @@
+# Cluster DESTINO (OCP) — clave pública pineada, servida localmente.
+#
+# Mismo patrón que poc-egress-kuadrant/destino/11-jwks-static.yaml, roles
+# invertidos: acá se pinea la clave pública que generó EKS
+# (kid egress-eks-1, ver ../eks-origen/05-authpolicy-wristband.yaml).
+#
+# Vive en el namespace de la APP (poc-ingress-kuadrant), no en connlink-ingress
+# — ese último es exclusivo del control plane del Gateway (runbook §4.1).
+#
+# RSA, no EC — mismo hallazgo medido en paas-arqlab (2026-08-05): el
+# verificador `jwt` de Authorino (go-oidc) sólo acepta RS256. Generar con:
+#   ../../poc-egress-kuadrant/keys/gen-signing-key.sh egress-eks-1 kuadrant-system RS256
+# (correr esto en EKS, no en OCP — la clave privada nunca sale de EKS)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jwks-egress-eks
+  namespace: poc-ingress-kuadrant
+# En vez de pegar `n` y `e` a mano, crear el ConfigMap del archivo real:
+#   oc -n poc-ingress-kuadrant create configmap jwks-egress-eks \
+#     --from-file=jwks.json=keys/out/jwks.json --dry-run=client -o yaml | oc apply -f -
+data:
+  jwks.json: |
+    {
+      "keys": [
+        {
+          "kty": "RSA",
+          "alg": "RS256",
+          "use": "sig",
+          "kid": "egress-eks-1",
+          "n": "<<< PEGAR n DE keys/out/jwks.json (generado en EKS) >>>",
+          "e": "AQAB"
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwks-egress-eks
+  namespace: poc-ingress-kuadrant
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: jwks-egress-eks}
+  template:
+    metadata:
+      labels: {app: jwks-egress-eks}
+    spec:
+      containers:
+        - name: httpd
+          image: registry.access.redhat.com/ubi9/httpd-24:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: jwks
+              mountPath: /var/www/html
+              readOnly: true
+          readinessProbe:
+            httpGet: {path: /jwks.json, port: 8080}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - name: jwks
+          configMap:
+            name: jwks-egress-eks
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwks-egress-eks
+  namespace: poc-ingress-kuadrant
+spec:
+  selector: {app: jwks-egress-eks}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Verificación:
+#   oc -n poc-ingress-kuadrant run curl --rm -it --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+#     curl -s http://jwks-egress-eks.poc-ingress-kuadrant.svc.cluster.local:8080/jwks.json

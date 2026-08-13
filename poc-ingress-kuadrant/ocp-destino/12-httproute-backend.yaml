@@ -1,0 +1,39 @@
+# Cluster DESTINO (OCP) — ruta hacia el backend ya migrado.
+#
+# Mismo patrón que poc-egress-kuadrant/destino/12-httproute-backend.yaml, con
+# una diferencia estructural: el Gateway (gw-hostnet) vive en un namespace
+# aparte (connlink-ingress), no en el namespace de la app — a diferencia del
+# lado EKS donde ingress-gw y backend comparten namespace. Por eso el
+# parentRef acá es cross-namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: backend
+  namespace: poc-ingress-kuadrant
+spec:
+  parentRefs:
+    - name: gw-hostnet
+      namespace: connlink-ingress
+      sectionName: https
+  hostnames:
+    # El Host que llega desde EKS SIN reescribir.
+    - "backend.poc-ingress-kuadrant.svc.cluster.local"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend
+          port: 8080
+---
+# Verificación:
+#   oc -n poc-ingress-kuadrant get httproute backend \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
+#
+# Si el parentRef cross-namespace es rechazado, revisar si hace falta un
+# ReferenceGrant explícito en connlink-ingress permitiendo HTTPRoutes desde
+# poc-ingress-kuadrant — el Gateway ya declara allowedRoutes.namespaces.from:
+# All (10-gateway-ingress-hostnet.yaml), que debería alcanzar sin
+# ReferenceGrant adicional (ese mecanismo es para certificateRefs/backendRefs
+# cross-namespace, no para parentRefs).

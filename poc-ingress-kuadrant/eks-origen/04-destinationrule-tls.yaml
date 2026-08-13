@@ -1,0 +1,83 @@
+# Cluster ORIGEN (EKS) — TLS origination en el gateway de egreso.
+#
+# Mismo patrón que poc-egress-kuadrant/origen/04, roles invertidos. La app
+# manda HTTP plano; el gateway abre TLS contra el cluster destino (OCP).
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: backend-destino-tls
+  namespace: poc-ingress-kuadrant
+spec:
+  # <<< PLACEHOLDER: mismo FQDN que el ServiceEntry (02)
+  host: "<destination-fqdn-ocp>"
+  trafficPolicy:
+    # POOL DE CONEXIONES — NO ES OPCIONAL. Medido en paas-arqlab (2026-08-06)
+    # contra EKS real en el sentido OCP->EKS (poc-egress-kuadrant/origen/04):
+    # sin este bloque, con RTT real y concurrencia, Envoy abre y cierra
+    # conexiones sin parar -> 503 (URX,UF) y p99 disparado a ~3x el RTT (un
+    # handshake completo por request). No se puede reproducir contra un
+    # destino local (RTT cero, abrir conexión es gratis); aparece recién
+    # contra el destino real.
+    #
+    # Los valores de abajo (maxConnections, idleTimeout) fueron calibrados
+    # para el NLB de AWS del otro sentido (idle timeout fijo de 350s, no
+    # configurable). Acá el destino es F5 + nodos on-prem de OCP, NO una NLB
+    # de AWS — el idle timeout del lado servidor puede ser distinto (o no
+    # existir un límite duro). CONFIRMAR el idle timeout real del F5/pool
+    # antes de copiar el valor 300s tal cual; el mecanismo (pool + reciclado
+    # antes que el servidor) es lo que hay que preservar, no el número exacto.
+    connectionPool:
+      tcp:
+        maxConnections: 64
+        connectTimeout: 5s
+      http:
+        idleTimeout: 300s   # <<< VERIFICAR contra el idle timeout real de F5/OCP
+        maxRequestsPerConnection: 0
+        h2UpgradePolicy: UPGRADE
+    portLevelSettings:
+      - port:
+          number: 443
+        tls:
+          mode: SIMPLE
+          sni: "<destination-fqdn-ocp>"
+          # QUÉ CA VA ACÁ depende de dónde termine el TLS en el destino:
+          #
+          #   gw-hostnet termina con el wildcard del banco (Envoy, vía SDS)
+          #   -> CA interna del banco  <-- diseño objetivo (depende de que se
+          #      resuelva el bloqueo documentado en el runbook §7.2; ver
+          #      ocp-destino/10-gateway-ingress-hostnet.yaml)
+          #
+          #   Mientras el §7.2 siga abierto y se use el workaround de F5
+          #   terminando TLS (runbook §7.3) -> la CA que valida acá es la que
+          #   emite el certificado que presenta el F5, no necesariamente la
+          #   misma cadena.
+          #
+          # MISMO PENDIENTE QUE YA TENÍAMOS ABIERTO DEL OTRO LADO: la cadena
+          # de CA correcta para esta jerarquía interna del banco (root
+          # "CN=Root CA Banco Galicia", Subject Key Identifier
+          # 9B:E7:80:85:7F:57:2F:38:49:B1:BE:7C:9D:93:39:14:D0:B2:BC:7E) todavía
+          # no se cerró — el certificado que se había pasado como "root" en su
+          # momento no era este (verificado por AKI/SKI, no por nombre). No
+          # asumir que es el mismo bundle que se usó para el Secret
+          # paas-demo-wildcard-tls del lado EKS sin volver a verificar cadena
+          # completa contra lo que realmente presente gw-hostnet.
+          #
+          # El Secret debe existir en el NAMESPACE DONDE CORREN LOS PODS DEL
+          # GATEWAY (poc-ingress-kuadrant, mismo ns que egress-gw):
+          #   kubectl -n poc-ingress-kuadrant get pods -l gateway.networking.k8s.io/gateway-name=egress-gw
+          credentialName: destino-ca
+          # Sólo PoC, mientras no se resuelva la cadena de CA: comentar
+          # credentialName y descomentar la línea siguiente. NO dejarlo así
+          # para producción: sin validación de cadena, el TLS protege de
+          # escucha pasiva pero no de un MITM.
+          # insecureSkipVerify: true
+---
+# Creación del Secret con la CA (una vez resuelta la cadena correcta):
+#   kubectl -n poc-ingress-kuadrant create secret generic destino-ca \
+#     --from-file=ca.crt=./root-ca-banco-galicia.pem \
+#     --from-file=cacert=./root-ca-banco-galicia.pem
+#
+# El `sni` es lo que hace que todo esto funcione sin reescribir el Host: el
+# request viaja con Host: backend.poc-ingress-kuadrant.svc.cluster.local pero
+# abre TLS anunciando <destination-fqdn-ocp>, que es lo que gw-hostnet espera
+# y lo que el certificado wildcard cubre.

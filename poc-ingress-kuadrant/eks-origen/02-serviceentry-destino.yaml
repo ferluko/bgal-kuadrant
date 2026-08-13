@@ -1,0 +1,48 @@
+# Cluster ORIGEN (EKS) — registro del endpoint remoto (OCP) en el service
+# registry de Istio.
+#
+# Mismo patrón que poc-egress-kuadrant/origen/02, roles invertidos.
+#
+# IMPORTANTE: el puerto 443 se declara con protocol: HTTP a propósito — patrón
+# oficial de "TLS origination en el egress gateway": Envoy rutea a nivel L7
+# (necesario para el HTTPRoute y para inyectar el header con el JWT) y el
+# upgrade a TLS lo hace el DestinationRule (04). Con HTTPS el tráfico sería TCP
+# opaco y no habría inyección posible.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: backend-destino
+  namespace: poc-ingress-kuadrant
+spec:
+  hosts:
+    # <<< PLACEHOLDER: FQDN público/corporativo del Gateway gw-hostnet en OCP.
+    - "<destination-fqdn-ocp>"
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 443
+      name: http-for-tls-origination
+      protocol: HTTP
+      targetPort: 443
+---
+# Pre-requisitos de red — EL DESTINO ES OCP ON-PREM, así que esto no es trámite:
+#
+#  1. **DNS.** <destination-fqdn-ocp> resuelve, vía F5/DNS corporativo, a las IPs
+#     de los nodos infra dedicados de gw-hostnet (no hay LoadBalancer nativo en
+#     ese cluster — ver poc-ingress-kuadrant/runbook §8). Verificarlo DESDE UN
+#     POD del cluster origen (EKS), no desde el bastión.
+#
+#  2. **Ruteo.** Camino L3 EKS -> on-prem: Direct Connect o VPN (la misma
+#     conectividad que ya se usa en sentido OCP->EKS, verificar que sea
+#     bidireccional — no asumirlo).
+#
+#  3. **Proxy corporativo / egress de la VPC.** Si el egreso de EKS hacia
+#     on-prem tiene que salir por un NAT Gateway o proxy explícito, confirmar
+#     que el rango de IPs de los nodos infra de OCP esté permitido.
+#
+# Chequeo desde un pod del cluster origen (EKS):
+#   kubectl -n poc-ingress-kuadrant run netcheck --rm -it --restart=Never \
+#     --image=registry.access.redhat.com/ubi9/ubi-minimal -- sh -c '
+#       getent hosts <destination-fqdn-ocp>;
+#       curl -sS -o /dev/null -w "%{http_code}\n" --max-time 5 \
+#         https://<destination-fqdn-ocp>/'
