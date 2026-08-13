@@ -23,7 +23,7 @@ apiVersion: security.istio.io/v1
 kind: RequestAuthentication
 metadata:
   name: egress-origen
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
@@ -47,7 +47,7 @@ apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
   name: require-egress-token
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
@@ -63,12 +63,12 @@ spec:
         - key: request.auth.claims[src_cluster]
           values: ["paas-arqlab"]
         - key: request.auth.claims[src_namespace]
-          values: ["echoserver"]
+          values: ["poc-egress-kuadrant"]
         - key: request.auth.claims[dst_service]
           values: ["backend"]
 ---
 # Verificación:
-#   kubectl -n echoserver get requestauthentication egress-origen -o yaml
+#   kubectl -n poc-egress-kuadrant get requestauthentication egress-origen -o yaml
 #   # sin token -> 403 "RBAC: access denied"
 #   curl -sS -o /dev/null -w '%{http_code}\n' https://app2.paas-demo.bancogalicia.com.ar/
 #

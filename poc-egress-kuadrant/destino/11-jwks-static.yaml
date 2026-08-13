@@ -12,7 +12,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: jwks-egress-origen
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 # RSA, no EC — medido en paas-arqlab (2026-08-05), RHCL 1.x: el verificador `jwt` de
 # Authorino (go-oidc) sólo acepta RS256 y no hay campo para declarar otros algoritmos.
 # Con ES256 rechaza el 100% de los tokens con un 401 indistinguible de "falta el token",
@@ -20,7 +20,7 @@ metadata:
 #
 # En vez de pegar `n` y `e` a mano, crear el ConfigMap del archivo — así no se puede
 # desincronizar de la clave real:
-#   oc -n echoserver create configmap jwks-egress-origen \
+#   oc -n poc-egress-kuadrant create configmap jwks-egress-origen \
 #     --from-file=jwks.json=keys/out/jwks.json --dry-run=client -o yaml | oc apply -f -
 data:
   jwks.json: |
@@ -41,7 +41,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jwks-egress
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   replicas: 2
   selector:
@@ -77,7 +77,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: jwks-egress
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   selector: {app: jwks-egress}
   ports:
@@ -86,8 +86,8 @@ spec:
       targetPort: 8080
 ---
 # Verificación:
-#   oc -n echoserver run curl --rm -it --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
-#     curl -s http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+#   oc -n poc-egress-kuadrant run curl --rm -it --image=registry.access.redhat.com/ubi9/ubi-minimal -- \
+#     curl -s http://jwks-egress.poc-egress-kuadrant.svc.cluster.local:8080/jwks.json
 #
 # Alternativa sin este Deployment: validar el JWT con Istio RequestAuthentication,
 # que sí acepta JWKS inline -> ver destino/13a-istio-jwt-validation.yaml

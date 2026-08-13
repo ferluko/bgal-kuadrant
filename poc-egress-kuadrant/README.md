@@ -127,7 +127,7 @@ ns poc-egress-kuadrant                 ┌────────┐
              ▼
    NLB internal (passthrough L4, NO termina TLS)
              │                              CLUSTER DESTINO — EKS
-             ▼                              ns echoserver
+             ▼                              ns poc-egress-kuadrant
                                     ┌──────────────────────────┐
                                     │ Gateway ingress-gw :443  │ class istio
                                     │ listener sin hostname    │ Envoy termina TLS

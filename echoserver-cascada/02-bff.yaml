@@ -2,9 +2,9 @@
 #
 #   bastión --> bff (este) --> backend --> bff (anida la respuesta) --> bastión
 #
-# ATENCIÓN si ya tenés `bff` desplegado como echo-server puro en `echoserver`:
+# ATENCIÓN si ya tenés `bff` desplegado como echo-server puro en `poc-egress-kuadrant`:
 # este Deployment lo REEMPLAZA. Mantiene a propósito `app: bff` y el puerto 8080
-# para que el Service `bff`, el HTTPRoute `app1` y las policies de Kuadrant sigan
+# para que el Service `bff`, el HTTPRoute del BFF y las policies de Kuadrant sigan
 # enganchando sin cambios. Guardá el manifiesto anterior antes de aplicar:
 #   oc -n poc-egress-kuadrant get deploy bff -o yaml > /tmp/bff-deploy.bak.yaml
 apiVersion: apps/v1

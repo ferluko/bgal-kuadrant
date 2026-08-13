@@ -28,7 +28,7 @@ apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
   name: backend-ingress-jwt
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
@@ -38,7 +38,7 @@ spec:
     authentication:
       "egress-wristband":
         jwt:
-          jwksUrl: http://jwks-egress.echoserver.svc.cluster.local:8080/jwks.json
+          jwksUrl: http://jwks-egress.poc-egress-kuadrant.svc.cluster.local:8080/jwks.json
           ttl: 300
         credentials:
           customHeader:
@@ -76,7 +76,7 @@ spec:
               expression: auth.identity.src_namespace
 ---
 # Verificación:
-#   oc -n echoserver get authpolicy backend-ingress-jwt \
+#   oc -n poc-egress-kuadrant get authpolicy backend-ingress-jwt \
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
 # Notas de compatibilidad:

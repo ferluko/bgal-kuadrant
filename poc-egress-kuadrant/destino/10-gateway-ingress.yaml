@@ -13,13 +13,13 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: echoserver
+  name: poc-egress-kuadrant
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: ingress-gw
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
   labels:
     # Necesaria para que Kuadrant gestione políticas sobre este Gateway (Opción B,
     # el camino recomendado). Inofensiva si se usa la Opción A (Istio a secas).
@@ -65,7 +65,7 @@ spec:
 # (un solo nivel de subdominio), así que sirve el mismo cert del banco en ambos
 # lados. Cargarlo como Secret TLS en el ns del Gateway:
 #
-#   kubectl -n echoserver create secret tls paas-demo-wildcard-tls \
+#   kubectl -n poc-egress-kuadrant create secret tls paas-demo-wildcard-tls \
 #     --cert=wildcard.paas-demo.bancogalicia.com.ar.crt \
 #     --key=wildcard.paas-demo.bancogalicia.com.ar.key
 #
@@ -76,7 +76,7 @@ spec:
 #
 # DNS a crear:
 #   app2.paas-demo.bancogalicia.com.ar.  CNAME  <nombre-dns-del-nlb>
-#   kubectl -n echoserver get svc -l gateway.networking.k8s.io/gateway-name=ingress-gw \
+#   kubectl -n poc-egress-kuadrant get svc -l gateway.networking.k8s.io/gateway-name=ingress-gw \
 #     -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}{"\n"}'
 #
 # Con NLB `internal`, ese hostname resuelve a IPs privadas: el DNS corporativo tiene
@@ -84,9 +84,9 @@ spec:
 # compartida). Verificar desde el cluster ORIGEN, no sólo desde el bastión.
 #
 # Verificación:
-#   kubectl -n echoserver get gateway ingress-gw \
+#   kubectl -n poc-egress-kuadrant get gateway ingress-gw \
 #     -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}{"\n"}'
 #
 # Y confirmar que el certificado LLEGÓ al proxy (ResolvedRefs=True no lo prueba —
 # ver el bloqueo de SDS del runbook de ingress §7.2):
-#   istioctl proxy-config secret deploy/ingress-gw-istio -n echoserver
+#   istioctl proxy-config secret deploy/ingress-gw-istio -n poc-egress-kuadrant

@@ -12,7 +12,7 @@ apiVersion: kuadrant.io/v1
 kind: RateLimitPolicy
 metadata:
   name: backend-rlp
-  namespace: echoserver
+  namespace: poc-egress-kuadrant
 spec:
   targetRef:
     group: gateway.networking.k8s.io
