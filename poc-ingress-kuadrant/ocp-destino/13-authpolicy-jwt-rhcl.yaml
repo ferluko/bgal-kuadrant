@@ -37,11 +37,11 @@ spec:
         patternMatching:
           patterns:
             - predicate: |
-                auth.identity.iss == "https://egress.<source-cluster-eks>.bancogalicia.com.ar"
+                auth.identity.iss == "https://egress.devops-cilium-1-35.bancogalicia.com.ar"
             - predicate: |
-                auth.identity.aud == "<destination-fqdn-ocp>"
+                auth.identity.aud == "bff.paas-demo.bancogalicia.com.ar"
             - predicate: |
-                auth.identity.src_cluster == "<source-cluster-eks>"
+                auth.identity.src_cluster == "devops-cilium-1-35"
             - predicate: |
                 auth.identity.src_namespace == "poc-ingress-kuadrant"
             - predicate: |
@@ -67,8 +67,8 @@ spec:
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
 # Placeholders a reemplazar antes de aplicar:
-#   <source-cluster-eks>   — identificador del cluster EKS origen (p.ej. devops-cilium-1-35)
-#   <destination-fqdn-ocp> — FQDN público/corporativo de gw-hostnet
+#   devops-cilium-1-35    — identificador del cluster EKS origen
+#   bff.paas-demo.bancogalicia.com.ar — FQDN público/corporativo de gw-hostnet
 # Tienen que coincidir EXACTO con los mismos valores en
 # ../eks-origen/05-authpolicy-wristband.yaml — son comparación por `==`
 # estricta, no hay normalización de ningún lado.

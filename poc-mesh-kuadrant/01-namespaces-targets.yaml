@@ -1,0 +1,118 @@
+# PoC — enforcement este-oeste: TODO tráfico entre apps en EKS pasa por
+# Kuadrant, sea mismo namespace o no. Dos namespaces de prueba, aislados de
+# las PoCs de cross-cluster (poc-egress-kuadrant / poc-ingress-kuadrant).
+#
+# meshtest-a: consumer + target-a (prueba mismo-namespace)
+# meshtest-b: target-b (prueba cross-namespace, consumer sigue en meshtest-a)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meshtest-a
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meshtest-b
+---
+# --- target-a: echo-server en meshtest-a ------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: target-a
+  namespace: meshtest-a
+  labels:
+    app: target-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: target-a}
+  template:
+    metadata:
+      labels: {app: target-a}
+    spec:
+      containers:
+        - name: echo-server
+          image: ealen/echo-server:0.9.2
+          env:
+            - {name: PORT, value: "8080"}
+            - {name: ENABLE__ENVIRONMENT, value: "true"}
+          ports:
+            - {name: http, containerPort: 8080, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false   # la imagen corre como root — mismo hallazgo de siempre
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: target-a
+  namespace: meshtest-a
+  labels: {app: target-a}
+spec:
+  selector: {app: target-a}
+  ports:
+    - {name: server-port, port: 8080, targetPort: 8080}
+---
+# --- target-b: echo-server en meshtest-b (namespace distinto) --------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: target-b
+  namespace: meshtest-b
+  labels:
+    app: target-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: target-b}
+  template:
+    metadata:
+      labels: {app: target-b}
+    spec:
+      containers:
+        - name: echo-server
+          image: ealen/echo-server:0.9.2
+          env:
+            - {name: PORT, value: "8080"}
+            - {name: ENABLE__ENVIRONMENT, value: "true"}
+          ports:
+            - {name: http, containerPort: 8080, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: target-b
+  namespace: meshtest-b
+  labels: {app: target-b}
+spec:
+  selector: {app: target-b}
+  ports:
+    - {name: server-port, port: 8080, targetPort: 8080}
+---
+# --- consumer: pod de prueba en meshtest-a, para correr curl a mano --------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: meshtest-a
+  labels: {app: consumer}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: consumer}
+  template:
+    metadata:
+      labels: {app: consumer}
+    spec:
+      containers:
+        - name: curl
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["sleep", "infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}

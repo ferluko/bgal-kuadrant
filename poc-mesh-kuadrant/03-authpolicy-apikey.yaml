@@ -1,0 +1,71 @@
+# AuthPolicy con apiKey — una por HTTPRoute (mismo patrón que el resto de la
+# PoC: la política se ataca por HTTPRoute, no por Gateway, así que cada
+# backend puede tener su propia lista de consumidores habilitados).
+#
+# El Secret con la credencial válida vive en kuadrant-system (03-04): mismo
+# límite que el wristband — `allNamespaces` no tiene efecto en esta instancia
+# de Authorino (namespaced, no cluster-wide), confirmado contra el CRD
+# instalado.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: route-a-apikey
+  namespace: meshtest-a
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: route-a
+  rules:
+    authentication:
+      "consumer-apikey":
+        apiKey:
+          selector:
+            matchLabels:
+              authorino.kuadrant.io/managed-by: authorino
+              app: meshtest
+        credentials:
+          customHeader:
+            name: x-api-key
+    response:
+      unauthenticated:
+        message:
+          value: "falta x-api-key"
+      unauthorized:
+        message:
+          value: "api key invalida o no habilitada para target-a"
+---
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: route-b-apikey
+  namespace: meshtest-b
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: route-b
+  rules:
+    authentication:
+      "consumer-apikey":
+        apiKey:
+          selector:
+            matchLabels:
+              authorino.kuadrant.io/managed-by: authorino
+              app: meshtest
+        credentials:
+          customHeader:
+            name: x-api-key
+    response:
+      unauthenticated:
+        message:
+          value: "falta x-api-key"
+      unauthorized:
+        message:
+          value: "api key invalida o no habilitada para target-b"
+---
+# Verificación:
+#   kubectl -n meshtest-a get authpolicy route-a-apikey \
+#     -o jsonpath='{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+#   kubectl -n meshtest-b get authpolicy route-b-apikey \
+#     -o jsonpath='{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'

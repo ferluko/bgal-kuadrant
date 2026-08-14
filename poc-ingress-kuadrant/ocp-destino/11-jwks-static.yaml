@@ -28,7 +28,7 @@ data:
           "alg": "RS256",
           "use": "sig",
           "kid": "egress-eks-1",
-          "n": "<<< PEGAR n DE keys/out/jwks.json (generado en EKS) >>>",
+          "n": "yCNk2YfNvI8HHPbV8Cbl1Uazu_XiCC01cjoWjvw-rBzCrHWdvuGWmVsHMzTbo5_eg9YoUFTecmZMH3olWkBeSPF_mfzPnrJi4ENIKFPswzYOp94U_A_itxbpdlEUWL4wanShUoCg2blAW-FrJ1dPLViOKCZoJbDyaKXoBQKB4KkRV-pGzoZJ-cJSNA9TFM9ndpoCHCyJWueDszpNV8MRfk0mvyaE1C1pUriZG9bg11Bk6rGW1Pni_EcwE8VC2DeqDSKx7EcyTEJ-s7KpdhNTbjdjL-Oxv5OGVJ264YIomjL0js3t0Z_1kB1Y3Lp1ZXIHWrNbjhTnCxIDp0b5yASz3Q",
           "e": "AQAB"
         }
       ]

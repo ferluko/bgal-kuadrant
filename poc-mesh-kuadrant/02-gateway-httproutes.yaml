@@ -1,0 +1,66 @@
+# Gateway compartido para las dos rutas (mismo-namespace y cross-namespace).
+# ClusterIP a propósito — es un Gateway interno, no de ingreso externo; nada
+# tiene que exponerlo fuera del cluster.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mesh-gw
+  namespace: meshtest-a
+  labels:
+    kuadrant.io/gateway: "true"
+  annotations:
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8080
+      allowedRoutes:
+        namespaces:
+          # From: All porque route-b vive en meshtest-b (cross-namespace).
+          from: All
+---
+# --- route-a: consumer -> target-a, MISMO namespace (meshtest-a) -----------
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-a
+  namespace: meshtest-a
+spec:
+  parentRefs:
+    - name: mesh-gw
+  hostnames:
+    - "target-a.meshtest-a.svc.cluster.local"
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - name: target-a
+          port: 8080
+---
+# --- route-b: consumer -> target-b, DISTINTO namespace (meshtest-b) --------
+# HTTPRoute vive en el namespace del BACKEND (convención Gateway API), con
+# parentRef cross-namespace hacia el Gateway en meshtest-a.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-b
+  namespace: meshtest-b
+spec:
+  parentRefs:
+    - name: mesh-gw
+      namespace: meshtest-a
+  hostnames:
+    - "target-b.meshtest-b.svc.cluster.local"
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - name: target-b
+          port: 8080
+---
+# Verificación:
+#   kubectl -n meshtest-a get gateway mesh-gw -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}{"\n"}'
+#   kubectl -n meshtest-a get httproute route-a -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'
+#   kubectl -n meshtest-b get httproute route-b -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'

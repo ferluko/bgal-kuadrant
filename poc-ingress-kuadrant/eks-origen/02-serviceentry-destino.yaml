@@ -3,11 +3,19 @@
 #
 # Mismo patrón que poc-egress-kuadrant/origen/02, roles invertidos.
 #
-# IMPORTANTE: el puerto 443 se declara con protocol: HTTP a propósito — patrón
-# oficial de "TLS origination en el egress gateway": Envoy rutea a nivel L7
-# (necesario para el HTTPRoute y para inyectar el header con el JWT) y el
-# upgrade a TLS lo hace el DestinationRule (04). Con HTTPS el tráfico sería TCP
-# opaco y no habría inyección posible.
+# PUERTO 443 (TLS origination) — DIFERIDO. Confirmado en vivo (2026-08-1x)
+# desde un pod de EKS: la conexión a bff.paas-demo.bancogalicia.com.ar:443
+# resetea durante el handshake TLS (SSL_connect: Connection reset by peer).
+# El F5 de este VIP es passthrough puro (no termina TLS, solo reenvía bytes),
+# así que el reset es 100% de Envoy en OCP: bloqueo confirmado del runbook
+# §7.2 (SDS nunca entrega el cert al proxy). No es un problema de este
+# ServiceEntry ni del origen.
+#
+# Mientras tanto se prueba TODO el resto del flujo (wristband, AuthPolicy,
+# claims) contra el puerto 80, que sí responde 200 de punta a punta — nunca
+# hubo TLS en ese tramo, en ningún punto (ni F5 ni Envoy hacen nada con TLS
+# ahí). El DestinationRule (04) que originaría TLS en 443 queda escrito pero
+# SIN APLICAR hasta que se resuelva el §7.2.
 apiVersion: networking.istio.io/v1
 kind: ServiceEntry
 metadata:
@@ -15,11 +23,15 @@ metadata:
   namespace: poc-ingress-kuadrant
 spec:
   hosts:
-    # <<< PLACEHOLDER: FQDN público/corporativo del Gateway gw-hostnet en OCP.
-    - "<destination-fqdn-ocp>"
+    - "bff.paas-demo.bancogalicia.com.ar"
   location: MESH_EXTERNAL
   resolution: DNS
   ports:
+    - number: 80
+      name: http
+      protocol: HTTP
+      targetPort: 80
+    # Puerto 443 para cuando se resuelva el §7.2 — no aplicar el 04 todavía.
     - number: 443
       name: http-for-tls-origination
       protocol: HTTP

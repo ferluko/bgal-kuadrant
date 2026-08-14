@@ -6,8 +6,14 @@
 # otro lado (istio#39136: no hay filtros a nivel de backendRef, y con dos
 # backends en la rule un filtro a nivel rule aplicaría a los dos). El Host
 # viaja sin reescribir; el gateway del destino (gw-hostnet) acepta el hostname
-# interno porque su listener tampoco declara hostname. El SNI lo fija el
-# DestinationRule (04), independiente del header Host.
+# interno porque su listener tampoco declara hostname.
+#
+# PUERTO 80, NO 443 — TEMPORAL. El 443 resetea en el handshake TLS (bloqueo
+# §7.2 confirmado en vivo, ver 02-serviceentry-destino.yaml). Sin TLS
+# origination no hay SNI que fijar; apuntando directo al 80 en plano se puede
+# validar wristband + AuthPolicy + claims igual, porque viajan en el header
+# x-egress-token, no dependen de la capa TLS. Volver a 443 cuando se resuelva
+# el §7.2 (y ahí sí aplicar 04-destinationrule-tls.yaml).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -32,8 +38,8 @@ spec:
         # backendRef a un host externo: extensión de Istio para Gateway API.
         - group: networking.istio.io
           kind: Hostname
-          name: "<destination-fqdn-ocp>"
-          port: 443
+          name: "bff.paas-demo.bancogalicia.com.ar"
+          port: 80
 ---
 # Verificación:
 #   kubectl -n poc-ingress-kuadrant get httproute egress-backend \

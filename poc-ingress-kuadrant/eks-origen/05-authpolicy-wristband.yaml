@@ -36,13 +36,13 @@ spec:
             wristband:
               # Se usa como claim "iss". El destino (OCP) lo valida
               # explícitamente contra este mismo valor.
-              issuer: "https://egress.<source-cluster-eks>.bancogalicia.com.ar"
+              issuer: "https://egress.devops-cilium-1-35.bancogalicia.com.ar"
               tokenDuration: 300
               customClaims:
                 "aud":
-                  value: "<destination-fqdn-ocp>"
+                  value: "bff.paas-demo.bancogalicia.com.ar"
                 "src_cluster":
-                  value: "<source-cluster-eks>"     # p.ej. devops-cilium-1-35
+                  value: "devops-cilium-1-35"     
                 "src_namespace":
                   value: poc-ingress-kuadrant
                 "src_service":

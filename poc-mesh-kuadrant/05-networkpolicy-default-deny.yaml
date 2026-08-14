@@ -1,0 +1,54 @@
+# El enforcement real: en Kubernetes, en cuanto UN pod queda seleccionado por
+# alguna NetworkPolicy de Ingress, pasa a ser deny-by-default excepto lo que
+# esa policy permita explícitamente — no hace falta una policy namespace-wide
+# aparte (`podSelector: {}`) para lograr el default-deny.
+#
+# A PROPÓSITO no hay una policy `podSelector: {}` a nivel namespace: eso
+# seleccionaría TAMBIÉN a los pods de mesh-gw (viven en meshtest-a, mismo
+# namespace que target-a) y podría cortarles el status-port/health-check de
+# Istio o el push del control plane — el mismo tipo de error que ya vimos una
+# vez con una policy mal alcanzada sacando al propio Gateway del
+# EndpointSlice. Acá el podSelector de cada policy apunta solo a `target-a`/
+# `target-b`; ni el consumer ni mesh-gw quedan afectados.
+#
+# target-a: sólo acepta ingress en :8080 desde los pods de mesh-gw (mismo ns).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-mesh-gw
+  namespace: meshtest-a
+spec:
+  podSelector:
+    matchLabels:
+      app: target-a
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: mesh-gw
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+# target-b: mesh-gw vive en OTRO namespace (meshtest-a) -> hace falta
+# namespaceSelector + podSelector combinados.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-mesh-gw
+  namespace: meshtest-b
+spec:
+  podSelector:
+    matchLabels:
+      app: target-b
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: meshtest-a
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: mesh-gw
+      ports:
+        - {protocol: TCP, port: 8080}
