@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1680 900" width="1680" height="900" font-family="Calibri, 'Segoe UI', Arial, sans-serif">
+<defs>
+<marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#5A6B7B"/></marker>
+<marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#1C7293"/></marker>
+<marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#D98324"/></marker>
+</defs>
+<rect x="0" y="0" width="1680" height="900" fill="#FFFFFF"/>
+<text x="840" y="34" text-anchor="middle" font-size="22" font-weight="bold" fill="#21295C">Keycloak como IdP — SIN Null en el medio</text>
+<text x="840" y="55" text-anchor="middle" font-size="12.5" fill="#5A6B7B" font-style="italic">El provisioning del cliente por consumidor es manual; solo la emisión y validación del token quedan automatizadas.</text>
+
+<!-- SECCION A: provisioning manual -->
+<rect x="40" y="85" width="1600" height="190" rx="14" fill="none" stroke="#D98324" stroke-width="2" stroke-dasharray="7,5"/>
+<rect x="58" y="72" width="230" height="24" fill="#FFFFFF"/>
+<text x="70" y="89" font-size="14" font-weight="bold" fill="#D98324">PROVISIONING — MANUAL</text>
+
+<rect x="80" y="150" width="220" height="60" rx="10" fill="#5A6B7B"/>
+<text x="190" y="185" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Admin de plataforma</text>
+
+<line x1="300" y1="180" x2="360" y2="180" stroke="#D98324" stroke-width="2" marker-end="url(#arrowOrange)"/>
+<circle cx="330" cy="164" r="13" fill="#D98324"/>
+<text x="330" y="169" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">1</text>
+
+<rect x="360" y="150" width="340" height="60" rx="10" fill="#065A82"/>
+<text x="530" y="176" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">Keycloak Admin Console / API</text>
+<text x="530" y="194" text-anchor="middle" font-size="11.5" fill="#CFE3EE">crea Client (client_id + secret)</text>
+
+<line x1="700" y1="180" x2="760" y2="180" stroke="#D98324" stroke-width="2" marker-end="url(#arrowOrange)"/>
+<circle cx="730" cy="164" r="13" fill="#D98324"/>
+<text x="730" y="169" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">2</text>
+
+<rect x="760" y="150" width="260" height="60" rx="10" fill="#5A6B7B"/>
+<text x="890" y="185" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">kubectl / GitOps</text>
+
+<line x1="1020" y1="180" x2="1080" y2="180" stroke="#D98324" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+<rect x="1080" y="150" width="490" height="60" rx="10" fill="#2E3872"/>
+<text x="1325" y="176" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">HTTPRoute + AuthPolicy (Kubernetes)</text>
+<text x="1325" y="194" text-anchor="middle" font-size="11" fill="#CFE3EE">apuntando a issuerUrl de Keycloak — a mano, por consumidor</text>
+
+<!-- SECCION B: runtime automatizado -->
+<rect x="40" y="300" width="1600" height="560" rx="14" fill="none" stroke="#1C7293" stroke-width="2" stroke-dasharray="7,5"/>
+<rect x="58" y="287" width="230" height="24" fill="#FFFFFF"/>
+<text x="70" y="304" font-size="14" font-weight="bold" fill="#1C7293">RUNTIME — AUTOMATIZADO</text>
+
+<rect x="90" y="360" width="280" height="70" rx="10" fill="#065A82"/>
+<text x="230" y="400" text-anchor="middle" font-size="15" font-weight="bold" fill="#FFFFFF">Consumer app (bff)</text>
+
+<line x1="370" y1="380" x2="520" y2="380" stroke="#1C7293" stroke-width="2" marker-end="url(#arrowTeal)"/>
+<text x="445" y="368" text-anchor="middle" font-size="11" fill="#1C7293" font-style="italic">3) client_credentials</text>
+<circle cx="445" cy="395" r="13" fill="#2E3872"/>
+<text x="445" y="400" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">3</text>
+
+<rect x="520" y="345" width="380" height="70" rx="10" fill="#02C39A"/>
+<text x="710" y="375" text-anchor="middle" font-size="14" font-weight="bold" fill="#04241C">Keycloak</text>
+<text x="710" y="393" text-anchor="middle" font-size="11.5" fill="#04241C">/realms/&lt;realm&gt;/protocol/openid-connect/token</text>
+
+<line x1="520" y1="415" x2="370" y2="415" stroke="#1C7293" stroke-width="2" marker-end="url(#arrowTeal)"/>
+<text x="445" y="432" text-anchor="middle" font-size="11" fill="#1C7293" font-style="italic">devuelve JWT firmado</text>
+
+<line x1="230" y1="430" x2="230" y2="490" stroke="#1C7293" stroke-width="2" marker-end="url(#arrowTeal)"/>
+<text x="250" y="465" text-anchor="start" font-size="11" fill="#1C7293" font-style="italic">4) request + Bearer JWT</text>
+<circle cx="230" cy="460" r="13" fill="#2E3872"/>
+<text x="230" y="465" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">4</text>
+
+<rect x="90" y="490" width="280" height="80" rx="10" fill="#065A82"/>
+<text x="230" y="524" text-anchor="middle" font-size="14" font-weight="bold" fill="#FFFFFF">Gateway</text>
+<text x="230" y="542" text-anchor="middle" font-size="11.5" fill="#CFE3EE">egress-gw / ingress-gw</text>
+<text x="230" y="558" text-anchor="middle" font-size="10.5" fill="#CFE3EE">AuthPolicy de Kuadrant</text>
+
+<line x1="370" y1="520" x2="520" y2="450" stroke="#1C7293" stroke-width="2" marker-end="url(#arrowTeal)"/>
+<circle cx="480" cy="475" r="13" fill="#2E3872"/>
+<text x="480" y="480" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">5</text>
+
+<rect x="520" y="450" width="440" height="110" rx="10" fill="#2E3872"/>
+<text x="740" y="478" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">Keycloak — /.well-known/openid-configuration</text>
+<text x="740" y="496" text-anchor="middle" font-size="12" fill="#FFFFFF">+ jwks_uri (descubrimiento OIDC estandar)</text>
+<text x="740" y="514" text-anchor="middle" font-size="11.5" fill="#CFE3EE">Authorino valida firma + claims (azp/client_id, aud)</text>
+<text x="740" y="532" text-anchor="middle" font-size="10.5" fill="#CFE3EE" font-style="italic">sin ConfigMap+httpd casero — JWKS lo publica Keycloak solo</text>
+
+<line x1="230" y1="570" x2="230" y2="630" stroke="#1C7293" stroke-width="2" marker-end="url(#arrowTeal)"/>
+<circle cx="230" cy="600" r="13" fill="#2E3872"/>
+<text x="230" y="605" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#FFFFFF">6</text>
+<text x="250" y="605" text-anchor="start" font-size="11" fill="#1C7293" font-style="italic">forward si valido</text>
+
+<rect x="90" y="630" width="280" height="70" rx="10" fill="#02C39A"/>
+<text x="230" y="670" text-anchor="middle" font-size="15" font-weight="bold" fill="#04241C">Backend</text>
+
+<!-- Nota clave -->
+<rect x="700" y="620" width="860" height="120" rx="10" fill="#F2F6F9" stroke="#D6E0E8" stroke-width="1.5"/>
+<text x="1130" y="648" text-anchor="middle" font-size="13" font-weight="bold" fill="#21295C">Lo que NO resuelve este esquema</text>
+<text x="1130" y="670" text-anchor="middle" font-size="11.5" fill="#21295C">El alta de un consumidor nuevo sigue siendo dos pasos manuales separados</text>
+<text x="1130" y="688" text-anchor="middle" font-size="11.5" fill="#21295C">(crear Client en Keycloak + aplicar HTTPRoute/AuthPolicy) — sin correlacion</text>
+<text x="1130" y="706" text-anchor="middle" font-size="11.5" fill="#21295C">automatica entre las dos cosas. Ese es el hueco que llena Null.</text>
+
+<!-- Leyenda -->
+<line x1="40" y1="770" x2="1640" y2="770" stroke="#D6E0E8" stroke-width="1.5"/>
+<circle cx="55" cy="795" r="9" fill="#D98324"/>
+<text x="75" y="799" font-size="12.5" fill="#21295C">Paso manual (humano)</text>
+<circle cx="300" cy="795" r="9" fill="#2E3872"/>
+<text x="320" y="799" font-size="12.5" fill="#21295C">Paso automatico en runtime</text>
+<circle cx="590" cy="795" r="9" fill="#02C39A"/>
+<text x="610" y="799" font-size="12.5" fill="#21295C">Keycloak (identidad)</text>
+<circle cx="820" cy="795" r="9" fill="#065A82"/>
+<text x="840" y="799" font-size="12.5" fill="#21295C">Componentes propios (app / gateway)</text>
+</svg>
