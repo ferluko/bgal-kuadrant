@@ -9,7 +9,7 @@ metadata:
   namespace: poc-ingress-kuadrant
 spec:
   # <<< PLACEHOLDER: mismo FQDN que el ServiceEntry (02)
-  host: "bff.paas-demo.bancogalicia.com.ar"
+  host: "bff-eks.paas-demo.bancogalicia.com.ar"
   trafficPolicy:
     # POOL DE CONEXIONES — NO ES OPCIONAL. Medido en paas-arqlab (2026-08-06)
     # contra EKS real en el sentido OCP->EKS (poc-egress-kuadrant/origen/04):
@@ -39,7 +39,7 @@ spec:
           number: 443
         tls:
           mode: SIMPLE
-          sni: "bff.paas-demo.bancogalicia.com.ar"
+          sni: "bff-eks.paas-demo.bancogalicia.com.ar"
           # QUÉ CA VA ACÁ depende de dónde termine el TLS en el destino:
           #
           #   gw-hostnet termina con el wildcard del banco (Envoy, vía SDS)
@@ -79,5 +79,5 @@ spec:
 #
 # El `sni` es lo que hace que todo esto funcione sin reescribir el Host: el
 # request viaja con Host: backend.poc-ingress-kuadrant.svc.cluster.local pero
-# abre TLS anunciando bff.paas-demo.bancogalicia.com.ar, que es lo que gw-hostnet espera
+# abre TLS anunciando bff-eks.paas-demo.bancogalicia.com.ar, que es lo que gw-hostnet espera
 # y lo que el certificado wildcard cubre.

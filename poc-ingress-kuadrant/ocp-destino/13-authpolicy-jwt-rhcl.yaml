@@ -39,7 +39,7 @@ spec:
             - predicate: |
                 auth.identity.iss == "https://egress.devops-cilium-1-35.bancogalicia.com.ar"
             - predicate: |
-                auth.identity.aud == "bff.paas-demo.bancogalicia.com.ar"
+                auth.identity.aud == "bff-eks.paas-demo.bancogalicia.com.ar"
             - predicate: |
                 auth.identity.src_cluster == "devops-cilium-1-35"
             - predicate: |
@@ -68,7 +68,7 @@ spec:
 #
 # Placeholders a reemplazar antes de aplicar:
 #   devops-cilium-1-35    — identificador del cluster EKS origen
-#   bff.paas-demo.bancogalicia.com.ar — FQDN público/corporativo de gw-hostnet
+#   bff-eks.paas-demo.bancogalicia.com.ar — FQDN público/corporativo de gw-hostnet
 # Tienen que coincidir EXACTO con los mismos valores en
 # ../eks-origen/05-authpolicy-wristband.yaml — son comparación por `==`
 # estricta, no hay normalización de ningún lado.

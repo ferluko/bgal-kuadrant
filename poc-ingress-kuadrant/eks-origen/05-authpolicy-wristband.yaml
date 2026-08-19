@@ -40,7 +40,7 @@ spec:
               tokenDuration: 300
               customClaims:
                 "aud":
-                  value: "bff.paas-demo.bancogalicia.com.ar"
+                  value: "bff-eks.paas-demo.bancogalicia.com.ar"
                 "src_cluster":
                   value: "devops-cilium-1-35"     
                 "src_namespace":

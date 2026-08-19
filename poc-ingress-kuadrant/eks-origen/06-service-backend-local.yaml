@@ -15,7 +15,7 @@ metadata:
     poc.galicia.io/rol: backend-local-canary
 spec:
   type: ClusterIP
-  # <<< AJUSTAR al selector real del Service backend en EKS antes del cutover
+  # Confirmado real: 00-backend-echo.yaml despliega backend con esta label.
   selector:
     app: backend
   ports:

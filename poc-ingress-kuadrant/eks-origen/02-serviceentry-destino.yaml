@@ -4,7 +4,7 @@
 # Mismo patrón que poc-egress-kuadrant/origen/02, roles invertidos.
 #
 # PUERTO 443 (TLS origination) — DIFERIDO. Confirmado en vivo (2026-08-1x)
-# desde un pod de EKS: la conexión a bff.paas-demo.bancogalicia.com.ar:443
+# desde un pod de EKS: la conexión a bff-eks.paas-demo.bancogalicia.com.ar:443
 # resetea durante el handshake TLS (SSL_connect: Connection reset by peer).
 # El F5 de este VIP es passthrough puro (no termina TLS, solo reenvía bytes),
 # así que el reset es 100% de Envoy en OCP: bloqueo confirmado del runbook
@@ -23,7 +23,7 @@ metadata:
   namespace: poc-ingress-kuadrant
 spec:
   hosts:
-    - "bff.paas-demo.bancogalicia.com.ar"
+    - "bff-eks.paas-demo.bancogalicia.com.ar"
   location: MESH_EXTERNAL
   resolution: DNS
   ports:

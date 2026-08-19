@@ -25,7 +25,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: bff        # <<< AJUSTAR a las labels reales del pod bff
+              app: bff        # confirmado: 00-bff.yaml
       ports:
         - protocol: TCP
           port: 8080
@@ -40,7 +40,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: bff                # <<< AJUSTAR
+      app: bff                # confirmado: 00-bff.yaml
   policyTypes:
     - Egress
   egress:
@@ -71,7 +71,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: backend               # <<< AJUSTAR a las labels reales del pod backend
+      app: backend               # confirmado: 00-backend-echo.yaml
   policyTypes:
     - Ingress
   ingress:

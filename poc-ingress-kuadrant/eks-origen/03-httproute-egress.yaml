@@ -14,11 +14,20 @@
 # validar wristband + AuthPolicy + claims igual, porque viajan en el header
 # x-egress-token, no dependen de la capa TLS. Volver a 443 cuando se resuelva
 # el §7.2 (y ahí sí aplicar 04-destinationrule-tls.yaml).
+#
+# FASE 2 — reparto por peso 50/50. Mismo patrón que
+# poc-egress-kuadrant/origen/08-rollout/fase2-pesos.yaml: dos backendRefs en
+# la misma rule, Gateway API reparte por weight relativo (no hace falta que
+# sumen 100). Precondición cumplida: 06-service-backend-local.yaml aplicado,
+# endpoints verificados iguales a los de backend antes del cutover.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: egress-backend
   namespace: poc-ingress-kuadrant
+  annotations:
+    poc.galicia.io/fase: "2-pesos"
+    poc.galicia.io/reparto: "50/50"
 spec:
   parentRefs:
     - name: egress-gw
@@ -35,17 +44,26 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
+        - name: backend-local
+          port: 8080
+          weight: 50
         # backendRef a un host externo: extensión de Istio para Gateway API.
         - group: networking.istio.io
           kind: Hostname
-          name: "bff.paas-demo.bancogalicia.com.ar"
+          name: "bff-eks.paas-demo.bancogalicia.com.ar"
           port: 80
+          weight: 50
 ---
 # Verificación:
 #   kubectl -n poc-ingress-kuadrant get httproute egress-backend \
 #     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
 #
-# Si el controller rechaza `kind: Hostname` como backendRef (no debería en
-# Istio upstream reciente, pero confirmarlo — es distinto del istiod gestionado
-# de OCP donde sí está probado), el fallback es un Service ExternalName hacia
-# el FQDN del destino.
+# Si el controller rechaza `kind: Hostname` como backendRef, o no soporta
+# `weight` sobre él (no debería — es distinto del istiod gestionado de OCP
+# donde sí está probado — confirmar en este cluster antes de creerle al
+# reparto), el fallback es un Service ExternalName hacia el FQDN del destino.
+#
+# ROLLBACK INSTANTÁNEO (sin tocar el Service, sin rollout de pods):
+#   kubectl -n poc-ingress-kuadrant patch httproute egress-backend --type json -p \
+#     '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":100},
+#       {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":0}]'

@@ -7,7 +7,7 @@
 # parentRef acá es cross-namespace.
 #
 # sectionName: http, NO https — TEMPORAL. Confirmado en vivo (2026-08-13) desde
-# un pod de EKS: bff.paas-demo.bancogalicia.com.ar:443 resetea en el handshake
+# un pod de EKS: bff-eks.paas-demo.bancogalicia.com.ar:443 resetea en el handshake
 # TLS (bloqueo runbook §7.2, SDS nunca entrega el cert). El puerto 80 sí
 # responde. Volver a "https" cuando se resuelva el §7.2 — ver también
 # eks-origen/02-serviceentry-destino.yaml y 03-httproute-egress.yaml, que ya
