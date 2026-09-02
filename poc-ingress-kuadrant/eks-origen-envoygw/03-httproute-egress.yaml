@@ -1,0 +1,51 @@
+# Cluster ORIGEN (EKS) — ruta de egreso, fase 2 (reparto 50/50).
+#
+# Igual que eks-origen/03-httproute-egress.yaml en todo lo demás (puerto 80
+# temporal por el bloqueo §7.2, mismo reparto de peso). Lo único que cambia es
+# el segundo backendRef: en vez de la extensión `group: networking.istio.io,
+# kind: Hostname`, referencia el Service estándar de
+# 02-service-endpointslice-destino.yaml.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-backend
+  namespace: poc-ingress-kuadrant
+  annotations:
+    poc.galicia.io/fase: "2-pesos"
+    poc.galicia.io/reparto: "50/50"
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "backend"
+    - "backend.poc-ingress-kuadrant"
+    - "backend.poc-ingress-kuadrant.svc"
+    - "backend.poc-ingress-kuadrant.svc.cluster.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend-local
+          port: 8080
+          weight: 50
+        - kind: Service
+          name: backend-destino
+          port: 80
+          weight: 50
+---
+# Verificación:
+#   kubectl -n poc-ingress-kuadrant get httproute egress-backend \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
+#
+# Si ResolvedRefs falla acá, confirmar primero si el Service tiene endpoints
+# reales (kubectl get endpointslice -n poc-ingress-kuadrant backend-destino) —
+# es el mismo síntoma que se reprodujo en vivo contra este cluster.
+#
+# ROLLBACK INSTANTÁNEO — mismo comando que eks-origen/03, sin cambios:
+#   kubectl -n poc-ingress-kuadrant patch httproute egress-backend --type json -p \
+#     '[{"op":"replace","path":"/spec/rules/0/backendRefs/0/weight","value":100},
+#       {"op":"replace","path":"/spec/rules/0/backendRefs/1/weight","value":0}]'

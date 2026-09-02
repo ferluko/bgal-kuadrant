@@ -1,0 +1,76 @@
+# Cluster ORIGEN (EKS) — el corazón de la PoC en este sentido.
+#
+# Mismo patrón que poc-egress-kuadrant/origen/05, roles invertidos: Authorino
+# firma un JWT de corta vida ("Festival Wristband") con la clave privada del
+# Secret egress-<kid>-1 y lo inyecta en el request SALIENTE hacia OCP, en el
+# header x-egress-token.
+#
+# OJO CON EL NAMESPACE DEL SECRET: este AuthPolicy vive en `poc-ingress-kuadrant`
+# de EKS, pero Kuadrant lo traduce a un AuthConfig en `kuadrant-system`, y
+# Authorino resuelve signingKeyRefs contra el ns del AUTHCONFIG. El Secret va
+# en `kuadrant-system` de EKS — ya verificado empíricamente en el sentido
+# OCP->EKS (§8bis del README de poc-egress-kuadrant), el mismo mecanismo aplica
+# acá sin cambios.
+#
+# El cliente (bff, corriendo en EKS) no manda ninguna credencial: la
+# autenticación de entrada al gateway de egreso es anonymous. Quién puede
+# llegar al gateway se restringe por NetworkPolicy (07).
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: egress-backend-jwt
+  namespace: poc-ingress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: egress-backend
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+    response:
+      success:
+        headers:
+          "x-egress-token":
+            wristband:
+              # Se usa como claim "iss". El destino (OCP) lo valida
+              # explícitamente contra este mismo valor.
+              issuer: "https://egress.devops-cilium-1-35.bancogalicia.com.ar"
+              tokenDuration: 300
+              customClaims:
+                "aud":
+                  value: "bff-eks.paas-demo.bancogalicia.com.ar"
+                "src_cluster":
+                  value: "devops-cilium-1-35"     
+                "src_namespace":
+                  value: poc-ingress-kuadrant
+                "src_service":
+                  value: bff
+                "dst_service":
+                  value: backend
+              signingKeyRefs:
+                - name: egress-eks-1     # <<< kid — generar con gen-signing-key.sh
+                  algorithm: RS256
+---
+# Verificación:
+#   kubectl -n poc-ingress-kuadrant get authpolicy egress-backend-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Generación de la clave — reusar el mismo script, apuntado a EKS:
+#   ../../poc-egress-kuadrant/keys/gen-signing-key.sh egress-eks-1 kuadrant-system RS256
+#
+# RS256 obligatorio, no ES256 — mismo hallazgo medido del otro lado (RHCL/
+# Authorino sólo valida RS256 con el verificador `jwt`; con EC el destino
+# rechaza el 100% de los tokens con un 401 indistinguible de "falta el token").
+# Ver keys/gen-signing-key.sh del otro sentido para el detalle completo
+# (PKCS#1 vs PKCS#8, etc.) — aplica igual acá, es una limitación de Authorino/
+# RHCL, no del cluster.
+#
+# El Secret egress-eks-1 (out/secret.yaml del script) DEBE vivir en
+# `kuadrant-system` de EKS. Si falta o está en otro ns, el síntoma es:
+#   kubectl -n poc-ingress-kuadrant get authpolicy egress-backend-jwt \
+#     -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#   -> "AuthPolicy waiting for the following components to sync: [AuthConfig (...)]"
+#   kubectl -n kuadrant-system logs deploy/authorino | grep 'Reconciler error'
+#   -> error: Secret "egress-eks-1" not found

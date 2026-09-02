@@ -1,0 +1,45 @@
+# Cluster ORIGEN — ruta de egreso (estado base: 100% al cluster destino).
+#
+# Igual que origen/03-httproute-egress.yaml en todo lo demás (matchea el
+# hostname interno sin reescribirlo, mismo motivo: dos backends en 08-rollout
+# no pueden tener un filtro por-backendRef). Lo único que cambia es el
+# backendRef: en vez de la extensión `group: networking.istio.io, kind:
+# Hostname` (que apunta directo al host declarado en el ServiceEntry), acá se
+# referencia el Service estándar de 02-service-endpointslice-destino.yaml — es
+# API core de Gateway API (`kind: Service` es el default, no hace falta
+# declararlo), portable a cualquier provider.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: egress-backend
+  namespace: poc-egress-kuadrant
+spec:
+  parentRefs:
+    - name: egress-gw
+      sectionName: mesh-internal
+  hostnames:
+    - "backend"
+    - "backend.poc-egress-kuadrant"
+    - "backend.poc-egress-kuadrant.svc"
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
+  rules:
+    - name: default
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend-destino
+          port: 443
+---
+# Verificación — mismos comandos que origen/03-httproute-egress.yaml:
+#   oc -n poc-egress-kuadrant get httproute egress-backend \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].message}{"\n"}'
+#   oc -n poc-egress-kuadrant get httproute egress-backend \
+#     -o jsonpath='{.status.parents[*].conditions[?(@.type=="ResolvedRefs")].message}{"\n"}'
+#
+# Si ResolvedRefs falla acá, el problema más probable es el mismo que se probó
+# en cilium-1-35: el EndpointSlice(FQDN) no está siendo consumido por el
+# provider — confirmarlo mirando si el Service tiene endpoints reales
+# (oc get endpointslice -n poc-egress-kuadrant backend-destino), no asumir que
+# es un problema de la ruta.

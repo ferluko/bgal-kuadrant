@@ -1,0 +1,55 @@
+# Cluster ORIGEN (paas-arqlab) — Gateway de egreso dedicado.
+#
+# DIFERENCIA CLAVE con origen/01-gateway-egress.yaml: gatewayClassName apunta a
+# Envoy Gateway, NO a "openshift-default" (que en OpenShift es OSSM/Istio por
+# debajo). Envoy Gateway tiene que estar instalado como un SEGUNDO controller de
+# Gateway API en el cluster — no reemplaza a OSSM, coexiste con él. Los demás
+# Gateways del cluster (los que no sean este) siguen en openshift-default sin
+# tocarse.
+#
+# Prerrequisito NO incluido acá — instalar el controller una sola vez por cluster
+# (Helm, ver https://gateway.envoyproxy.io/docs/install/install-helm/):
+#   helm install eg oci://docker.io/envoyproxy/gateway-helm \
+#     --version v1.2.0 -n envoy-gateway-system --create-namespace
+#   kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway \
+#     --for=condition=Available
+#
+# SIN CONFIRMAR contra el cluster OCP real (paas-arqlab): esta sesión no tiene
+# acceso a ese cluster. La instalación de Envoy Gateway se validó conceptualmente
+# contra la CRD gateway.networking.k8s.io instalada, no se probó en vivo ahí. Sí
+# se probó en vivo el hallazgo que motiva este cambio (Istio no resuelve
+# EndpointSlice FQDN) contra cilium-1-35, que corre la misma familia de Istio
+# (1.30.2) que OSSM usa por debajo — evidencia fuerte de que aplica igual, no
+# confirmación directa en OCP.
+#
+# El resto de las razones de diseño (Service ClusterIP, label de Kuadrant, mismo
+# namespace que la app) no cambia — ver origen/01-gateway-egress.yaml.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: egress-gw
+  namespace: poc-egress-kuadrant
+  labels:
+    kuadrant.io/gateway: "true"
+spec:
+  gatewayClassName: envoy-gateway
+  listeners:
+    - name: mesh-internal
+      protocol: HTTP
+      port: 8080
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Envoy Gateway crea un Service ClusterIP por defecto para gateways sin
+# annotation de tipo — a diferencia de Istio en este cluster, acá NO hace falta
+# la annotation `networking.istio.io/service-type: ClusterIP` (es Istio-specific,
+# Envoy Gateway la ignoraría). Si el Service sale LoadBalancer igual, controlarlo
+# vía el recurso `EnvoyProxy` referenciado desde el GatewayClass — ver
+# https://gateway.envoyproxy.io/docs/tasks/operations/customize-envoyproxy/
+#
+# Verificación:
+#   oc -n poc-egress-kuadrant get gateway egress-gw \
+#     -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}{"\n"}'
+#   oc -n poc-egress-kuadrant get pods -l gateway.networking.k8s.io/gateway-name=egress-gw
+#   oc -n poc-egress-kuadrant get svc  -l gateway.networking.k8s.io/gateway-name=egress-gw

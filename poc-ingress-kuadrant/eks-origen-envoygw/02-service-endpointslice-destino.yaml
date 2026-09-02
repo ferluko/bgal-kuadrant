@@ -1,0 +1,51 @@
+# Cluster ORIGEN (EKS) — registro del endpoint remoto (OCP) SIN ServiceEntry.
+#
+# Reemplaza a eks-origen/02-serviceentry-destino.yaml. Mismos dos puertos que
+# el original (80 activo hoy, 443 diferido por el bloqueo §7.2 de SDS en OCP —
+# ver el comentario original, sigue aplicando igual acá).
+#
+# PROBADO EN VIVO — este es el mismo cluster/versión de Istio (1.30.2,
+# cilium-1-35) contra el que se confirmó que `addressType: FQDN` no funciona:
+# istiod nunca puebla el endpoint ("has no endpoints" en el log), 503 "no
+# healthy upstream". Acá aplica sin necesidad de transferir el hallazgo entre
+# clusters — es el mismo. Sirve únicamente si además se instala Envoy Gateway
+# como controller (ver 01).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-destino
+  namespace: poc-ingress-kuadrant
+spec:
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 80
+    - name: http-for-tls-origination
+      port: 443
+      protocol: TCP
+      targetPort: 443
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: backend-destino
+  namespace: poc-ingress-kuadrant
+  labels:
+    kubernetes.io/service-name: backend-destino
+addressType: FQDN
+ports:
+  - name: http
+    port: 80
+    protocol: TCP
+  - name: http-for-tls-origination
+    port: 443
+    protocol: TCP
+endpoints:
+  - addresses:
+      - "bff-eks.paas-demo.bancogalicia.com.ar"
+---
+# Los prerrequisitos de red (DNS, ruteo L3 EKS->on-prem, proxy corporativo) son
+# EXACTAMENTE los mismos que en eks-origen/02-serviceentry-destino.yaml — no
+# cambian con el provider de Gateway API. Ver ese archivo para el detalle y el
+# comando de chequeo desde un pod.

@@ -1,0 +1,52 @@
+# Cluster ORIGEN — registro del endpoint remoto SIN ServiceEntry.
+#
+# Reemplaza a origen/02-serviceentry-destino.yaml. Es API core de Kubernetes
+# (Service + EndpointSlice), no una extensión de Istio — funciona con Envoy
+# Gateway (y con cualquier otro provider de Gateway API) sin piezas adicionales.
+#
+# PROBADO EN VIVO contra cilium-1-35 (Istio 1.30.2) y NO FUNCIONA ahí: istiod
+# nunca puebla el cluster de Envoy con el endpoint FQDN ("has no endpoints" en
+# el log, 503 "no healthy upstream" en el gateway) — por eso este archivo es
+# la alternativa cuando el provider es Envoy Gateway, no un reemplazo universal
+# de ServiceEntry en todos los casos.
+#
+# Kubernetes además marca `addressType: FQDN` como deprecated en el propio
+# apply ("spec.addressType: FQDN endpoints are deprecated") — es un mecanismo
+# de transición, no la forma final. Revisar el estado de esto antes de llevarlo
+# a producción; puede requerir Backend (extensión de Envoy Gateway, ver
+# https://gateway.envoyproxy.io/docs/tasks/traffic/routing-outside-kubernetes/)
+# en vez de EndpointSlice si el proyecto lo deprecía del todo.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-destino
+  namespace: poc-egress-kuadrant
+spec:
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: 443
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: backend-destino
+  namespace: poc-egress-kuadrant
+  labels:
+    kubernetes.io/service-name: backend-destino
+addressType: FQDN
+ports:
+  - name: https
+    port: 443
+    protocol: TCP
+endpoints:
+  # <<< PLACEHOLDER: FQDN público del gateway del cluster destino — mismo valor
+  # que origen/02-serviceentry-destino.yaml spec.hosts.
+  - addresses:
+      - "app2.paas-demo.bancogalicia.com.ar"
+---
+# Los prerrequisitos de red (DNS, ruteo L3, proxy corporativo) son EXACTAMENTE
+# los mismos que en origen/02-serviceentry-destino.yaml — no cambian con el
+# provider de Gateway API. Ver ese archivo para el detalle y el comando de
+# chequeo desde un pod.

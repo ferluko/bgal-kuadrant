@@ -1,0 +1,77 @@
+# Cluster ORIGEN — TLS origination en el gateway de egreso, SIN DestinationRule.
+#
+# BackendTLSPolicy es Gateway API estándar (Standard channel desde v1.4) — pero
+# solo cubre la parte de TLS. El DestinationRule original (origen/04) también
+# carga el connectionPool (maxConnections, timeouts) — eso NO tiene equivalente
+# en BackendTLSPolicy. Ver el segundo recurso más abajo.
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: backend-destino-tls
+  namespace: poc-egress-kuadrant
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: backend-destino
+  validation:
+    # <<< PLACEHOLDER: mismo FQDN que el ServiceEntry/EndpointSlice — es el SNI,
+    # igual que `sni:` en el DestinationRule original.
+    hostname: app2.paas-demo.bancogalicia.com.ar
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: destino-ca-bundle
+---
+# `caCertificateRefs` en Gateway API espera un ConfigMap (no un Secret, a
+# diferencia del `credentialName` de Istio). El Secret `destino-ca` de
+# origen/04-destinationrule-tls.yaml ya tiene la CA correcta — se deriva el
+# ConfigMap DE ESE Secret con un comando, no se retranscribe el PEM a mano acá
+# (evita transcribir mal un certificado):
+#
+#   oc -n poc-egress-kuadrant get secret destino-ca -o jsonpath='{.data.ca\.crt}' \
+#     | base64 -d \
+#     | oc -n poc-egress-kuadrant create configmap destino-ca-bundle --from-file=ca.crt=/dev/stdin
+#
+# Mantener el Secret original si algo más todavía lo usa; este ConfigMap es
+# aditivo, no lo reemplaza.
+---
+# EL GAP REAL: el connectionPool del DestinationRule original NO es cosmético —
+# es la tuning que evitó los 503 URX,UF medidos en producción contra el RTT real
+# de EKS (~170ms). BackendTLSPolicy no tiene un campo equivalente. Envoy Gateway
+# sí tiene una extensión propia para esto (`gateway.envoyproxy.io`, NO Gateway
+# API estándar) — mapeo best-effort, SIN VERIFICAR campo por campo contra la
+# versión de Envoy Gateway que se instale:
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: backend-destino-pool
+  namespace: poc-egress-kuadrant
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: backend-destino
+  circuitBreaker:
+    maxConnections: 64
+  timeout:
+    tcp:
+      connectTimeout: 5s
+    http:
+      # Ver el comentario original sobre por qué 300s y no 350s (idle timeout
+      # del NLB de AWS, no configurable) — origen/04-destinationrule-tls.yaml
+      # líneas 30-32.
+      connectionIdleTimeout: 300s
+---
+# SIN CONFIRMAR — verificar antes de cualquier prueba real:
+#   1. Nombres exactos de campos de BackendTrafficPolicy contra
+#      `kubectl explain backendtrafficpolicy.spec` una vez instalado Envoy
+#      Gateway (esta sesión no tiene ese CRD disponible para chequearlo).
+#   2. maxRequestsPerConnection: 0 y h2UpgradePolicy del original no tienen
+#      traducción directa encontrada — puede que no haga falta (el comentario
+#      original ya dice que h2UpgradePolicy no tenía efecto observado), pero
+#      maxRequestsPerConnection: 0 (no reciclar por cantidad) sí es relevante y
+#      quedó sin mapear acá.
+#   3. Repetir la misma medición contra RTT real (paas-arqlab -> EKS) que
+#      motivó este bloque en el original — no asumir que estos valores
+#      producen el mismo resultado solo porque los números coinciden.

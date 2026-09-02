@@ -1,0 +1,127 @@
+# Cluster ORIGEN — EL CUTOVER DE LA INTERCEPCIÓN. Aplicar ÚLTIMO.
+#
+# ⚠️ ESTE ARCHIVO SE ROMPE CON ENVOY GATEWAY — confirmado en vivo del lado
+# análogo EKS→OCP (poc-ingress-kuadrant/eks-origen-envoygw/09), no en este
+# cluster OCP puntual (sin acceso desde esta sesión), pero el mecanismo es el
+# mismo Gateway API estándar de los dos lados — ver el workaround al final del
+# archivo antes de usar esto con Envoy Gateway acá.
+#
+# El Service `backend` NO se recrea: se le cambia el `selector` in-place para que
+# sus endpoints pasen a ser los pods del gateway de egreso en lugar de los pods de
+# la app. La ClusterIP (172.30.169.54) no cambia, el nombre DNS no cambia, el
+# puerto no cambia. El Deployment `backend` NO se toca: sigue corriendo y sirviendo
+# a través del Service `backend-local` (06).
+#
+# Para el cliente `bff` no cambió nada: misma URL, misma IP, mismo puerto.
+#
+# EL PROBLEMA CON ENVOY GATEWAY: este archivo depende de que el pod del
+# gateway viva en EL MISMO namespace que el Service `backend` — un Service de
+# Kubernetes solo puede seleccionar pods de su propio namespace, regla dura
+# del API. Con Istio/OSSM, el pod de `egress-gw` se crea en
+# `poc-egress-kuadrant` (mismo ns que el Gateway) — el selector funciona. Con
+# Envoy Gateway, el pod se crea en el namespace DEL CONTROLLER
+# (`envoy-gateway-system` en el caso probado), no el de la app — el selector
+# deja de encontrar nada y `backend:8080` empieza a devolver Connection
+# refused. Reproducido en vivo del lado EKS→OCP; asumir que aplica igual acá
+# hasta confirmarlo.
+#
+# ESTADO ACTUAL DEL SERVICE VERIFICADO EN paas-arqlab (2026-08):
+#   selector: {"app":"backend"}
+#   ports:    [{"name":"server-port","port":8080,"protocol":"TCP","targetPort":8080}]
+# targetPort es NUMÉRICO -> el único campo a cambiar es el selector.
+#
+# PRECONDICIONES:
+#   1. 08-rollout/fase0-espejo.yaml ya aplicado -> el tráfico que entre al gateway
+#      vuelve a los pods locales. El camino cambia, el destino todavía no.
+#   2. 06-service-backend-local.yaml aplicado y con los mismos endpoints que backend.
+#   3. La cadena de egreso probada a mano (README §7.1).
+#
+# FORMA RECOMENDADA DE APLICARLO — patch de un campo, con backup:
+#
+#   oc -n poc-egress-kuadrant get svc backend -o yaml > /tmp/backend-svc.bak.yaml
+#   oc -n poc-egress-kuadrant patch svc backend --type merge -p \
+#     '{"spec":{"selector":{"gateway.networking.k8s.io/gateway-name":"egress-gw"}}}'
+#
+# ROLLBACK — un patch, ~1 segundo, los pods reales nunca se detuvieron:
+#
+#   oc -n poc-egress-kuadrant patch svc backend --type merge -p \
+#     '{"spec":{"selector":{"app":"backend"}}}'
+#
+# ---------------------------------------------------------------------------
+# Representación declarativa del estado final del Service, para GitOps.
+# Campos tomados del Service real; no incluir clusterIP (inmutable y ya asignada,
+# `apply` la preserva).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: poc-egress-kuadrant
+  annotations:
+    poc.galicia.io/intercepcion: "egress-gw"
+    poc.galicia.io/rollback: 'oc -n poc-egress-kuadrant patch svc backend --type merge -p ''{"spec":{"selector":{"app":"backend"}}}'''
+spec:
+  type: ClusterIP
+  # ÚNICO cambio funcional respecto del Service original.
+  # La label la ponen los pods que autodespliega el deployment controller de istiod
+  # para la GatewayClass openshift-default (verificado: gw-one-*-xjr8z en ns connlink
+  # matchea gateway.networking.k8s.io/gateway-name=gw-one).
+  selector:
+    gateway.networking.k8s.io/gateway-name: egress-gw
+  ports:
+    - name: server-port
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Verificación inmediata:
+#   # la ClusterIP NO cambió
+#   oc -n poc-egress-kuadrant get svc backend -o jsonpath='{.spec.clusterIP}{"\n"}'   # 172.30.169.54
+#
+#   # los endpoints ahora son pods del gateway
+#   oc -n poc-egress-kuadrant get endpointslice -l kubernetes.io/service-name=backend \
+#     -o jsonpath='{.items[*].endpoints[*].targetRef.name}{"\n"}'
+#
+#   # y el tráfico sigue llegando a la app local (fase 0)
+#   oc -n poc-egress-kuadrant exec deploy/bff -- \
+#     curl -s -o /dev/null -w '%{http_code}\n' http://backend.poc-egress-kuadrant.svc.cluster.local:8080/
+
+################################################################################
+# WORKAROUND — SOLO SI EL PROVIDER ES ENVOY GATEWAY, reemplaza al Service de
+# arriba. No probado en vivo en este cluster (sin acceso desde esta sesión) —
+# ver el mismo workaround, probado parcialmente del lado EKS, en
+# poc-ingress-kuadrant/eks-origen-envoygw/09-cutover-service-selector.yaml.
+################################################################################
+#
+# En vez de un selector por label (que no cruza namespaces), un Service tipo
+# ExternalName: no selecciona pods, es un alias de DNS que SÍ puede apuntar a
+# un Service en otro namespace.
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: backend
+#   namespace: poc-egress-kuadrant
+#   annotations:
+#     poc.galicia.io/intercepcion: "egress-gw (envoy gateway, ExternalName)"
+# spec:
+#   type: ExternalName
+#   # <<< Nombre AUTOGENERADO por Envoy Gateway al crear el Gateway — confirmar
+#   # el nombre real después de aplicar 01-gateway-egress.yaml:
+#   #   oc -n envoy-gateway-system get svc \
+#   #     -l gateway.networking.k8s.io/gateway-name=egress-gw -o name
+#   externalName: envoy-poc-egress-kuadrant-egress-gw-<hash>.envoy-gateway-system.svc.cluster.local
+#   ports:
+#     - port: 8080
+#
+# EL PROBLEMA DE ESTE WORKAROUND: <hash> lo genera el controller, no es
+# estable garantizado — si el Gateway se recrea (no solo se actualiza), el
+# hash puede cambiar y el ExternalName queda apuntando a un nombre que ya no
+# existe, rompiendo el cutover en silencio (DNS que no resuelve, no un error
+# visible al aplicar). Mitigación a explorar, sin confirmar: fijar el nombre
+# del Service vía el recurso EnvoyProxy (el mismo que fuerza ClusterIP en
+# 01-gateway-egress.yaml) — no se confirmó que exponga ese campo.
+#
+# ROLLBACK — igual que arriba, volver el selector a `app: backend` (el
+# ExternalName no vuelve solo, hay que reaplicar el Service original):
+#   oc -n poc-egress-kuadrant patch svc backend --type merge -p \
+#     '{"spec":{"type":"ClusterIP","selector":{"app":"backend"},"externalName":null}}'
