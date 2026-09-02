@@ -1,0 +1,76 @@
+# Cluster ORIGEN (paas-arqlab, OCP) — reemplazo del wristband self-signed (05-authpolicy-wristband.yaml)
+# por un JWT-SVID minteado por Vault. Mismo patrón que
+# poc-ingress-kuadrant/vault-emisor-spiffe/authpolicy-vault-spiffe-ejemplo.yaml (EKS), roles
+# invertidos. BORRADOR — no aplicado en vivo (sin acceso CLI a OCP desde esta sesión), pero cada
+# endpoint que usa SÍ está confirmado en vivo por separado: login real con SA token de
+# authorino-authorino en paas-arqlab -> 200, mint contra egress-gw-ocp -> 200, JWT-SVID con sub/aud
+# correctos (ver 14-vault-login-cronjob.yaml para el detalle completo de la prueba).
+#
+#   1. Login vía auth/jwt-ocp (mount separado de auth/jwt porque el issuer de OCP,
+#      https://kubernetes.default.svc, es interno — no alcanzable desde Vault; auth/jwt-ocp usa
+#      claves estáticas en vez de discovery en vivo, ver 14-vault-login-cronjob.yaml).
+#   2. La identidad que se valida es la de AUTHORINO MISMO en kuadrant-system de paas-arqlab
+#      (confirmado en vivo: serviceAccountName: authorino-authorino), no la de un consumer.
+#   3. Login separado del mint por la misma limitación de Authorino de siempre — CronJob aparte
+#      (14-vault-login-cronjob.yaml, mismo directorio) hace el login, Authorino solo hace el mint
+#      leyendo el resultado vía sharedSecretRef (header, no body).
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: egress-backend-vault-spiffe
+  namespace: poc-egress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: egress-backend
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+
+    metadata:
+      "vault_mint":
+        http:
+          url: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/spiffe/role/egress-gw-ocp/mintjwt"
+          method: POST
+          headers:
+            "X-Vault-Namespace":
+              value: "admin/spiffe"
+          sharedSecretRef:
+            name: vault-egress-token-ocp
+            key: client_token
+          credentials:
+            customHeader:
+              name: "X-Vault-Token"
+          body:
+            expression: '"{\"audience\": \"app2.paas-demo.bancogalicia.com.ar\"}"'
+        priority: 0
+
+    authorization:
+      "vault_mint_check":
+        patternMatching:
+          patterns:
+            - predicate: "has(auth.metadata.vault_mint.data.token)"
+
+    response:
+      success:
+        headers:
+          # Reemplaza al x-egress-token del wristband original. Con "Bearer " de prefijo, igual
+          # que la versión EKS — el AuthPolicy del lado destino (EKS) tiene que esperar ese
+          # prefijo en credentials.customHeader.prefix.
+          "x-egress-token":
+            plain:
+              expression: '"Bearer " + auth.metadata.vault_mint.data.token'
+---
+# Verificación (mismo patrón que el resto de este documento):
+#   oc -n poc-egress-kuadrant get authpolicy egress-backend-vault-spiffe \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Del lado destino (EKS), el AuthPolicy que valida (destino/13b-authpolicy-jwt-kuadrant.yaml)
+# cambia de JWKS estático (jwks-egress-origen) al JWKS de Vault:
+#   jwksUrl: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/admin/spiffe/spiffe/.well-known/keys"
+# y las claims-esperados de src_cluster/src_namespace/dst_service (ya no existen en el token) por
+# sub == "spiffe://poc-egress.bancogalicia.com.ar/paas-arqlab/egress-gw" — ver
+# destino/13c-authpolicy-jwt-vault-spiffe.yaml (mismo directorio, este cambio SÍ se puede aplicar
+# desde esta sesión, hay acceso CLI a EKS).

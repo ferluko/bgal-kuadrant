@@ -1,0 +1,81 @@
+# Cluster DESTINO (EKS, cilium-1-35) — actualiza 13b-authpolicy-jwt-kuadrant.yaml para validar el
+# JWT-SVID minteado por Vault (spiffe secrets engine) en vez del wristband self-signed viejo.
+# Mismo patrón que poc-ingress-kuadrant/ocp-destino/13-authpolicy-jwt-rhcl-vault-spiffe.yaml
+# (misma corrección, dirección inversa) — ver ese archivo para el detalle completo de por qué cada
+# cambio, acá el resumen:
+#
+#   1. jwksUrl -> JWKS real de Vault. CONFIRMADO EN VIVO (mismo endpoint que la otra dirección,
+#      mismo Vault): GET a esta URL devuelve 200, con el kid del token real
+#      (106d5461-f073-5fe0-1241-d5c8a5bf7cd2) entre las keys.
+#   2. credentials.customHeader.prefix -> el CRD instalado en este cluster (confirmado leyendo el
+#      schema real) SOLO acepta el campo "name", no "prefix" (a diferencia de lo documentado en el
+#      header original de 13b, que sí lo tenía como opción). Se omite el campo — Authorino
+#      aparentemente steriliza el prefijo "Bearer " por default al parsear el header, sin
+#      necesidad de configurarlo (mismo comportamiento implícito que ya funciona del lado OCP, que
+#      tampoco lo tiene configurado).
+#   3. claims-esperados reescrito contra sub (el SPIFFE ID) — src_cluster/src_namespace/dst_service
+#      ya no existen en el JWT-SVID de Vault. El token real, minteado y confirmado en vivo desde
+#      paas-arqlab con la identidad real de Authorino, decodifica a:
+#        {"aud": ["app2.paas-demo.bancogalicia.com.ar"], "sub": "spiffe://poc-egress.bancogalicia.com.ar/paas-arqlab/egress-gw", ...}
+#   4. Los headers de respuesta que leían src_cluster/src_namespace quedan vacíos — misma decisión
+#      pendiente que del otro lado (si backend los necesita, hay que decidir de dónde sacarlos).
+#
+# A DIFERENCIA de la otra dirección, ESTE archivo sí se pudo aplicar en vivo desde esta sesión
+# (hay acceso CLI a EKS) — ver estado real al pie.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: backend-ingress-vault-spiffe
+  namespace: poc-egress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: backend
+  rules:
+    authentication:
+      "egress-vault-spiffe":
+        jwt:
+          jwksUrl: https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/admin/spiffe/spiffe/.well-known/keys
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+    authorization:
+      "claims-esperados":
+        patternMatching:
+          patterns:
+            - predicate: |
+                auth.identity.iss == "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200"
+            - predicate: |
+                "app2.paas-demo.bancogalicia.com.ar" in auth.identity.aud
+            - predicate: |
+                auth.identity.sub == "spiffe://poc-egress.bancogalicia.com.ar/paas-arqlab/egress-gw"
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de backend"
+      success:
+        headers: {}
+---
+# Verificación:
+#   kubectl -n poc-egress-kuadrant get authpolicy backend-ingress-vault-spiffe \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# OJO — lección aprendida de la otra dirección (ver vault-emisor-spiffe.md §2quater): que esto
+# quede "Enforced: True" y que un request con token válido pase NO prueba que rechace inválidos.
+# Antes de dar esto por cerrado, repetir la prueba negativa real (token con sub/aud que no matchea,
+# vía un cambio temporal y reversible en el role de spiffe, con aprobación explícita) una vez que
+# el CronJob y la AuthPolicy de origen (poc-egress-kuadrant/origen/14 y 15) estén aplicados del
+# lado OCP y haya tráfico real cruzando.
+#
+# APLICADO EN VIVO — 2026-09-02, confirmado Accepted+Enforced, la vieja (backend-ingress-jwt)
+# quedó Overridden automáticamente (mismo mecanismo de Kuadrant visto del otro lado). SIN TRÁFICO
+# REAL en los 30 min previos a aplicar (confirmado en logs de Authorino) — bajo riesgo, pero real:
+# ESTE CAMBIO ROMPE el wristband viejo que sigue mandando OCP hasta que se apliquen origen/14 y
+# origen/15 del lado OCP. Si algo empieza a fallar con 401/403 en esta ruta antes de que OCP esté
+# listo, es exactamente por esto — no es un bug nuevo, es la ventana esperada entre aplicar el
+# destino y aplicar el origen.
