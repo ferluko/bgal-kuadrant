@@ -1,0 +1,102 @@
+# Cluster DESTINO (OCP) — BORRADOR, actualiza 13-authpolicy-jwt-rhcl.yaml para validar el
+# JWT-SVID minteado por Vault (spiffe secrets engine) en vez del wristband self-signed viejo.
+# Ver vault-emisor-spiffe/vault-emisor-spiffe.md §2ter para el contexto completo del lado EKS,
+# ya desplegado y confirmado en vivo (2026-09-02) — este archivo es lo que falta del lado OCP,
+# que no se puede aplicar desde esta sesión por falta de acceso a ese cluster.
+#
+# NO PROBADO EN VIVO CONTRA RHCL — a diferencia del resto de este documento (cada URL/JWKS de acá
+# SÍ está confirmada en vivo por separado, ver los tres puntos de abajo). Aplicar como reemplazo
+# de backend-ingress-jwt (mismo targetRef, Kuadrant va a resolver el conflicto igual que en EKS)
+# o editar el original in-place — a criterio de quien lo aplique.
+#
+# CAMBIOS respecto del original (13-authpolicy-jwt-rhcl.yaml), y por qué:
+#
+#   1. jwksUrl -> apunta al JWKS real de Vault, no al ConfigMap/httpd estático viejo.
+#      CONFIRMADO EN VIVO: GET a esta URL exacta devuelve 200, con el kid del token real
+#      (106d5461-f073-5fe0-1241-d5c8a5bf7cd2) entre las keys. Se usa jwksUrl directo (no
+#      issuerUrl/discovery) a propósito: el discovery de Vault publica "issuer" como host:puerto
+#      SIN el path del mount, pero el documento de discovery en sí solo se puede pedir CON el path
+#      completo -- si Authorino valida que el issuer del documento matchee el issuerUrl configurado
+#      (comportamiento típico de librerías OIDC estándar tipo go-oidc), esa combinación falla. Con
+#      jwksUrl directo se evita todo ese problema.
+#
+#   2. credentials.customHeader.prefix -> de "" a "Bearer ". El wristband viejo NO llevaba prefijo
+#      en el header; el AuthPolicy nuevo del lado EKS sí lo agrega
+#      (`"Bearer " + auth.metadata.vault_mint.data.token`, confirmado en vivo: el header real que
+#      llegó a backend fue `x-egress-token: Bearer eyJhbGci...`). Sin este cambio, Authorino va a
+#      intentar parsear "Bearer eyJ..." completo como el JWT y va a fallar.
+#
+#   3. claims-esperados -> reescrito. Los claims custom del wristband (src_cluster, src_namespace,
+#      dst_service) NO EXISTEN en el JWT-SVID de Vault. El token real, decodificado en vivo, solo
+#      tiene:
+#        {
+#          "aud": ["bff-eks.paas-demo.bancogalicia.com.ar"],
+#          "iss": "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200",
+#          "sub": "spiffe://poc-egress.bancogalicia.com.ar/poc/egress-gw",
+#          "vault": {"entity": {"id": "..."}},
+#          "exp"/"iat"/"nbf": estándar
+#        }
+#      Se valida contra sub (el SPIFFE ID) en vez de los claims custom viejos.
+#      SIN VERIFICAR: si `aud` en el CEL de Authorino se compara como lista o como string — acá
+#      quedó con `in`, tratándolo como lista (es como llega el claim real, entre corchetes). Si
+#      Authorino lo aplana a string, cambiar a `==`.
+#
+#   4. response.success.headers -> DECISIÓN PENDIENTE, no resuelta acá. Los dos headers originales
+#      leían src_cluster/src_namespace, que ya no existen como claims. Si backend los necesita
+#      aguas abajo, hay que decidir de dónde sacarlos ahora (ej. parsear el sub, o quitarlos del
+#      todo si nadie los consume). Se dejan comentados abajo como referencia de lo que había.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: backend-ingress-vault-spiffe
+  namespace: poc-ingress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: backend
+  rules:
+    authentication:
+      "egress-vault-spiffe":
+        jwt:
+          jwksUrl: https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/admin/spiffe/spiffe/.well-known/keys
+          ttl: 300
+        credentials:
+          customHeader:
+            name: x-egress-token
+            prefix: "Bearer "
+    authorization:
+      "claims-esperados":
+        patternMatching:
+          patterns:
+            - predicate: |
+                auth.identity.iss == "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200"
+            - predicate: |
+                "bff-eks.paas-demo.bancogalicia.com.ar" in auth.identity.aud
+            - predicate: |
+                auth.identity.sub == "spiffe://poc-egress.bancogalicia.com.ar/poc/egress-gw"
+    response:
+      unauthenticated:
+        message:
+          value: "falta o es invalido el token de egreso (x-egress-token)"
+      unauthorized:
+        message:
+          value: "el token de egreso no corresponde a un consumidor habilitado de backend"
+      success:
+        headers: {}
+          # Originales, ya no aplican tal cual (leían claims que no existen más):
+          #   "x-forwarded-src-cluster":
+          #     plain:
+          #       expression: auth.identity.src_cluster
+          #   "x-forwarded-src-namespace":
+          #     plain:
+          #       expression: auth.identity.src_namespace
+---
+# Verificación (mismo patrón que el original):
+#   oc -n poc-ingress-kuadrant get authpolicy backend-ingress-vault-spiffe \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Una vez aplicado, repetir el mismo curl que confirmó el tráfico real (desde bff en EKS):
+#   kubectl -n poc-ingress-kuadrant exec <pod-bff> -- \
+#     curl -sS http://backend.poc-ingress-kuadrant.svc.cluster.local:8080/
+# y confirmar 200 con el token real, en vez de 401/403.

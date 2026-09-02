@@ -1,0 +1,94 @@
+# Cluster ORIGEN (EKS) — hace el login a Vault (auth/jwt) por fuera de Authorino, porque
+# Authorino no tiene forma nativa de leer su propio SA token y meterlo en el body de un POST
+# (ver la nota en authpolicy-vault-spiffe-ejemplo.yaml). Corre con la MISMA ServiceAccount que
+# Authorino (authorino-authorino) — es la identidad que Vault espera validar (bound_subject
+# "system:serviceaccount:kuadrant-system:authorino-authorino").
+#
+# Frecuencia: cada 30 min. El token de Vault que devuelve auth/jwt tiene lease_duration=3600s (1h,
+# confirmado en vivo tanto con AppRole como con auth/jwt real — ver vault-emisor-spiffe.md §2ter).
+# 30 min deja margen antes de que venza.
+#
+# OJO: "*/50 * * * *" (versión anterior de este archivo) NO significa "cada 50 minutos" — en el
+# campo de minutos de cron corre en los minutos 0 y 50 de cada hora, un intervalo IRREGULAR (10 min
+# entre :50->:00, 50 min entre :00->:50). Confirmado en vivo el 2026-09-02 viendo el historial de
+# Jobs. No llegó a causar un vencimiento real (el TTL de 1h daba margen igual), pero no era lo que
+# decía el comentario. "*/30" sí funciona como se espera (corre en :00 y :30, cada 30 min parejo).
+#
+# CONFIRMADO EN VIVO — 2026-09-02: aplicado, corrido manualmente y en su schedule normal varias
+# veces, deja el Secret poblado correctamente, y un mint usando ese Secret funciona (ver §2ter). La
+# imagen usada abajo sigue siendo un placeholder funcional — cualquier imagen con curl + kubectl +
+# una forma de parsear JSON alcanza.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-egress-login
+  namespace: kuadrant-system
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: authorino-authorino
+          restartPolicy: OnFailure
+          containers:
+            - name: vault-login
+              # Placeholder — cualquier imagen con curl + kubectl + jq.
+              image: alpine/k8s:1.30.0
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  RESP=$(curl -sS -X POST \
+                    "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/auth/jwt/login" \
+                    -H "X-Vault-Namespace: admin/spiffe" \
+                    -d "{\"role\": \"authorino-egress\", \"jwt\": \"${SA_TOKEN}\"}")
+                  CLIENT_TOKEN=$(echo "$RESP" | jq -r '.auth.client_token')
+                  if [ -z "$CLIENT_TOKEN" ] || [ "$CLIENT_TOKEN" = "null" ]; then
+                    echo "login failed: $RESP" >&2
+                    exit 1
+                  fi
+                  kubectl -n kuadrant-system create secret generic vault-egress-token \
+                    --from-literal=client_token="$CLIENT_TOKEN" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+---
+# RBAC — el ServiceAccount authorino-authorino necesita permiso para crear/actualizar ESTE
+# Secret puntual. No dárselo de forma más amplia que esto.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-egress-token-writer
+  namespace: kuadrant-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["vault-egress-token"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-egress-token-writer
+  namespace: kuadrant-system
+subjects:
+  - kind: ServiceAccount
+    name: authorino-authorino
+    namespace: kuadrant-system
+roleRef:
+  kind: Role
+  name: vault-egress-token-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Verificación:
+#   kubectl -n kuadrant-system get secret vault-egress-token -o jsonpath='{.data.client_token}' | base64 -d
+#   kubectl -n kuadrant-system get cronjob vault-egress-login
+#   kubectl -n kuadrant-system logs job/<el-job-más-reciente>
+#
+# NOTA: el Secret vault-egress-token queda vacío hasta el primer run del CronJob — o correr un Job
+# manual una vez (kubectl create job --from=cronjob/vault-egress-login vault-egress-login-manual)
+# para no esperar hasta el próximo horario.

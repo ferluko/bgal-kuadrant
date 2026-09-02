@@ -1,0 +1,135 @@
+# Cluster ORIGEN (EKS) — reemplazo del wristband self-signed (05-authpolicy-wristband.yaml) por
+# un JWT-SVID minteado por Vault. BORRADOR — no probado en vivo como AuthConfig real (a diferencia
+# del resto del directorio), pero cada endpoint que usa SÍ está confirmado en vivo por separado
+# (login, mint, discovery, JWKS — ver vault-emisor-spiffe/vault-emisor-spiffe.md §2bis).
+#
+# CAMBIOS respecto de la versión anterior de este archivo:
+#   1. Login vía `auth/jwt`, no AppRole — decisión de seginf (escala mejor, no depende de
+#      TokenReview por diseño, no por config). Cierra además el problema que tenía AppRole: ya no
+#      hace falta guardar ningún secret_id en ningún lado, porque el propio SA token de Authorino
+#      ES la credencial.
+#   2. La identidad que se valida es la de AUTHORINO MISMO, no la de egress-gw. Corrección de un
+#      supuesto anterior: Authorino corre en su PROPIO Deployment (kuadrant-system), con su propia
+#      ServiceAccount (`authorino-authorino`, confirmado en vivo) — nunca tiene acceso al token
+#      del pod de egress-gw, solo al suyo. La "Opción B" de la que se había hablado tenía el sujeto
+#      equivocado: no es "la identidad del gateway", es "la identidad de Authorino".
+#   3. RESUELTO el "SIN VERIFICAR" de la versión anterior (cómo leer el propio token de Authorino
+#      dentro de una AuthConfig) — no tiene solución declarativa, es un límite real de Authorino,
+#      no algo que faltaba buscar bien (ver el comentario largo en `metadata` más abajo). Se separó
+#      el login del mint: el login lo hace un CronJob aparte
+#      (`13-vault-login-cronjob.yaml`, mismo directorio), Authorino solo hace el mint, leyendo el
+#      resultado del login vía `sharedSecretRef` — que sí es 100% nativo, porque ahí el dato va en
+#      un header, no en el body.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: egress-backend-vault-spiffe
+  namespace: poc-ingress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: egress-backend
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+
+    metadata:
+      # RESUELTO — el login (paso 1 original) SE SACÓ de acá. Motivo: Authorino no tiene forma
+      # nativa de leer su propio SA token montado y meterlo en un body JSON (confirmado revisando
+      # el tipo Go de metadata.http — ValueOrSelector solo lee literales o el "authorization JSON"
+      # de la request entrante, nunca el filesystem del pod; y sharedSecretRef, que sí lee un
+      # Secret, solo puede colocarlo en header/query/cookie, nunca en el body — y Vault exige el
+      # JWT en el body para /v1/auth/jwt/login). Es un límite real de Authorino, no algo que
+      # faltaba configurar bien.
+      #
+      # La solución: separar el login del mint. Un CronJob aparte (ver 13-vault-login-cronjob.yaml
+      # en este mismo directorio) hace el login cada ~50 min y deja el client_token en un Secret.
+      # Authorino solo hace el mint (paso 2), que SÍ encaja 100% con lo que Authorino soporta
+      # nativamente, porque el X-Vault-Token va en un header, no en el body.
+      "vault_mint":
+        http:
+          url: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/spiffe/role/egress-gw/mintjwt"
+          method: POST
+          headers:
+            "X-Vault-Namespace":
+              value: "admin/spiffe"
+          sharedSecretRef:
+            name: vault-egress-token
+            key: client_token
+          credentials:
+            customHeader:
+              name: "X-Vault-Token"
+          body:
+            expression: '"{\"audience\": \"bff-eks.paas-demo.bancogalicia.com.ar\"}"'
+        priority: 0
+
+    # No dejar pasar el request si Vault no devolvió un token.
+    authorization:
+      "vault_mint_check":
+        patternMatching:
+          patterns:
+            - predicate: "has(auth.metadata.vault_mint.data.token)"
+
+    response:
+      success:
+        headers:
+          # Reemplaza al x-egress-token del wristband original. Nombre de header a confirmar con
+          # el equipo destino — acá se deja igual que el original para no romper el contrato ya
+          # acordado, pero con Vault como emisor el estándar sería `Authorization: Bearer`.
+          "x-egress-token":
+            plain:
+              expression: '"Bearer " + auth.metadata.vault_mint.data.token'
+---
+# Verificación (mismo patrón que 05-authpolicy-wristband.yaml):
+#   kubectl -n poc-ingress-kuadrant get authpolicy egress-backend-vault-spiffe \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Del lado destino, el AuthPolicy que valida (13-authpolicy-jwt-*.yaml o equivalente) cambia
+# issuerUrl de la referencia JWKS estática al discovery de Vault:
+#   issuerUrl: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/admin/spiffe/spiffe"
+# — puerto 8200 (NO el 8202 default), confirmado en vivo end-to-end: login, mint, discovery y
+# JWKS los cuatro contra este puerto y path, sin token, sin headers custom — igual que llamaría
+# Authorino.
+---
+# HECHO EN VIVO — 2026-09-02 (los 4 puntos del pedido original a Seginf, resueltos nosotros mismos
+# dentro de admin/spiffe con el AppRole admin que ya teníamos):
+#
+# 1. auth/jwt habilitado (POST /sys/auth/jwt), configurado (POST /auth/jwt/config) con
+#      oidc_discovery_url: "https://oidc.eks.us-east-1.amazonaws.com/id/156ABC1620DFEDDD04E0791D480CDF9F"
+#    Confirmado con GET /auth/jwt/config → 200.
+#
+# 2. Role auth/jwt "authorino-egress" creado, bound_subject a la identidad real de Authorino:
+#      bound_subject: "system:serviceaccount:kuadrant-system:authorino-authorino"
+#      bound_audiences: ["https://kubernetes.default.svc"]
+#    (Nota: la creación pegó un 412 "required index state not present" transitorio — mismo
+#    síntoma en spiffe/role, mount ya funcionando, y NO en auth/kubernetes probado en paralelo
+#    como control. Se resolvió solo ~20 min después sin cambios. Ver
+#    incidente-412-index-state.md.)
+#
+# 3. claim_mappings configurado (namespace/SA reales → entity alias metadata):
+#      kubernetes.io/namespace -> service_account_namespace
+#      kubernetes.io/serviceaccount/name -> service_account_name
+#
+# 4. Policy acotada creada y asignada — spiffe-mint-only-policy, SOLO
+#      path "spiffe/role/egress-gw/mintjwt" { capabilities = ["update"] }
+#    (ya NO usa spiffe-administrator-policy, que era admin de todo el namespace — esa quedó
+#    reservada para el AppRole de pruebas/administración).
+#
+# CONFIRMADO EN VIVO — 2026-09-02, cadena completa con identidad real (no el AppRole de admin):
+#   1. Pod efímero en kuadrant-system con serviceAccountName: authorino-authorino (misma SA que
+#      usa Authorino de verdad, sin tocar el pod real) hace login real:
+#        POST /auth/jwt/login  {"role": "authorino-egress", "jwt": "<su propio SA token>"}
+#      -> 200, client_token con policies ["default", "spiffe-mint-only-policy"].
+#   2. Ese client_token (y SOLO ese, con la policy acotada del punto 4) mintea:
+#        POST /spiffe/role/egress-gw/mintjwt  {"audience": "bff-eks.paas-demo.bancogalicia.com.ar"}
+#      -> 200, JWT-SVID válido, sub/aud/kid correctos.
+#   (De paso: el role de spiffe se llamaba "egress-gw-test" de las pruebas manuales originales —
+#   se creó "egress-gw" limpio, sin el sufijo, que es el que usa este AuthPolicy y la policy.)
+#
+# PENDIENTE (fuera del alcance de esta sesión, requiere acceso al cluster destino):
+#   - Aplicar 13-vault-login-cronjob.yaml (CronJob + RBAC) en kuadrant-system.
+#   - Aplicar este AuthPolicy sobre la ruta egress-backend real en poc-ingress-kuadrant.
+#   - Cambiar el issuerUrl del lado OCP (destino) al discovery de Vault — alguien con acceso a
+#     ese cluster tiene que hacerlo, no se puede desde acá.
