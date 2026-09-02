@@ -349,6 +349,85 @@ que **no** está resuelto es la validación de claims del lado OCP (§2quater) �
 correctness/seguridad, no de estabilidad. Son dos preguntas distintas: "¿el mecanismo aguanta
 tráfico?" (sí) vs. "¿rechaza lo que tiene que rechazar?" (no, confirmado que no).
 
+## 2sexies. Dirección inversa — OCP→EKS (2026-09-02)
+
+Mismo mecanismo, roles invertidos: origen `poc-egress-kuadrant` (OCP, `paas-arqlab`), destino
+`poc-egress-kuadrant/destino` (EKS). Detalle completo en
+[`poc-egress-kuadrant/origen/15-authpolicy-vault-spiffe.yaml`](../poc-egress-kuadrant/origen/15-authpolicy-vault-spiffe.yaml)
+y [`14-vault-login-cronjob.yaml`](../poc-egress-kuadrant/origen/14-vault-login-cronjob.yaml).
+Resumen:
+
+- `auth/jwt-ocp` (mount separado de `auth/jwt`) porque el issuer de OCP,
+  `https://kubernetes.default.svc`, es interno — no alcanzable desde Vault. Configurado con
+  `jwt_validation_pubkeys` estáticas (sacadas una vez de `/openid/v1/jwks` del cluster), no
+  `oidc_discovery_url`.
+- Login + mint confirmados en vivo con la identidad real de Authorino en `paas-arqlab`.
+- **Dos bugs reales encontrados y corregidos en el camino, distintos entre sí**:
+  1. **Timeout de mint** — la latencia real `paas-arqlab`→Vault es ~0.5s, contra un timeout fijo
+     de 200ms en el `ext_authz` de Kuadrant. Falla intermitente, ~25% en una tanda de 15. Fix
+     diseñado (mint pre-hecho por el `CronJob`, servido por un `httpd` local) pero **no aplicado**
+     — decisión explícita de priorizar que funcione antes de optimizar. Ver
+     `poc-egress-kuadrant/origen/PROPUESTA-fix-latencia-mint-ocp.md`.
+  2. **Prefijo `"Bearer "` no soportado** — la suposición de que Authorino lo saca automáticamente
+     al parsear el header (asumida en la dirección EKS→OCP, nunca verificada ahí porque OCP no
+     estaba validando nada de todas formas, ver §2quater) resultó ser **incorrecta**. Confirmado
+     en vivo: con el prefijo, el 100% de los requests que cruzaban a EKS fallaban con
+     `UNAUTHENTICATED`. Corregido en ambas direcciones — las `AuthPolicy` de origen ahora mandan
+     el JWT crudo, sin prefijo (mismo criterio que el wristband original).
+
+**CONFIRMADO EN VIVO — tráfico real cruzando OCP→EKS, con validación exitosa**: después del fix
+del prefijo, 15/15 requests exitosos (antes había fallado el 100% de los que cruzaban), con 11 de
+esos 15 aterrizando en el pod real de `backend` en EKS (confirmado por hostname del pod,
+`backend-8868795f8-rbj75`, verificado que existe en el cluster EKS) y `authorized:true` en los
+logs de Authorino de EKS para esos requests. **Esta es la primera confirmación real de tráfico
+cruzando en esta dirección** — una afirmación anterior de que "funciona de punta a punta" resultó
+falsa al verificarla (el usuario detectó la inconsistencia), así que vale la pena remarcar: esto
+sí está verificado con evidencia directa (logs + hostname del pod), no inferido del estado
+`Enforced` de la `AuthPolicy`.
+
+**Actualización — el problema de latencia también se resolvió, con un fix más simple del
+originalmente diseñado**: en vez del CronJob+httpd de `PROPUESTA-fix-latencia-mint-ocp.md`,
+`metadata.http` en Authorino tiene un campo `cache` nativo (`cache.key` + `cache.ttl`, confirmado
+leyendo el schema real del CRD). Con un `key` constante y `ttl: 250` (por debajo de los 300s del
+mint), Authorino deja de golpear a Vault en cada request — una sola llamada real por ventana de
+TTL. **Confirmado en vivo: 29/29 requests cruzando a EKS con `authorized:true`, cero fallos**,
+después de aplicar el cache. El diseño más robusto (mint pre-hecho, servido localmente) queda
+archivado como alternativa, no hizo falta.
+
+**Estado final de esta dirección: funcional y confiable, ambos problemas encontrados (prefijo
+`"Bearer "` y latencia del mint) corregidos y confirmados en vivo con evidencia directa de logs.**
+
+**Latencia OCP→EKS** (con el fix de cache ya aplicado, 30 requests desde `bff` en `paas-arqlab`,
+separados por hostname del pod que respondió):
+
+| Destino | n | promedio | mediana | min | max |
+|---|---|---|---|---|---|
+| Local (OCP, mismo cluster) | 15 | 191.9ms | 176.0ms | 173.2ms | 257.2ms |
+| EKS (cruzando cluster) | 12 | 379.3ms | 417.6ms | 336.8ms | 424.7ms |
+
+**Overhead de cruzar: ~187.5ms** — mismo orden de magnitud que la dirección EKS→OCP (~211ms,
+§2quinquies). 2 de los 30 intentos de esta muestra vinieron con hostname vacío en el body (posible
+hiccup puntual, sin investigar más — en paralelo se confirmó 29/29 `authorized:true` en un loop
+similar, así que no parece ser el mint/auth la causa).
+
+**Investigado, no resuelto — piso de latencia alto incluso para el destino local**: pegarle al
+mismo backend local pero **sin** pasar por el Gateway/`AuthPolicy` (`backend-local` directo) tomó
+**28.7ms**. Pasando por el Gateway con Authorino de por medio (mismo destino local), **176-192ms**
+— es decir, **~150-160ms de overhead puro del pipeline Envoy↔Authorino**, ya con el cache del mint
+puesto (no es Vault). Se investigaron y descartaron las dos causas más probables:
+- **CPU/recursos de Authorino**: uso real insignificante (`1m` CPU, `104Mi` memoria) — sin
+  requests/limits configurados en el Deployment, pero sin señal de starvation.
+- **Latencia de red cruda entre nodos** (Authorino corre en `worker-0-lt78n`, el Gateway en
+  `worker-0-lgp2q` — nodos distintos): medida directa con `curl` (TCP connect puro) entre esos dos
+  nodos específicos, **0.5-2.7ms** — nada.
+
+El overhead real está en algún punto de la capa de mTLS/gRPC entre Envoy y Authorino, o en el
+procesamiento interno de Authorino (evaluación CEL, etc.) — no aislado más en detalle por falta de
+tiempo en esta sesión (haría falta LogLevel debug en Authorino, que afecta todo el cluster, o
+mirar timing interno de Envoy). Decisión: dejarlo así por ahora — ~380ms cruzando a EKS es
+razonable para esta integración, no bloquea el uso; profiling más fino queda pendiente si en algún
+momento hace falta optimizar más.
+
 ## 3. Por qué esto contradice la evaluación original
 
 La evaluación de `AppRole` (2026-08-14) decía:

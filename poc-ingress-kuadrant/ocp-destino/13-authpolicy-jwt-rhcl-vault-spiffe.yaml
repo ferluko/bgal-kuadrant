@@ -20,11 +20,13 @@
 #      (comportamiento típico de librerías OIDC estándar tipo go-oidc), esa combinación falla. Con
 #      jwksUrl directo se evita todo ese problema.
 #
-#   2. credentials.customHeader.prefix -> de "" a "Bearer ". El wristband viejo NO llevaba prefijo
-#      en el header; el AuthPolicy nuevo del lado EKS sí lo agrega
-#      (`"Bearer " + auth.metadata.vault_mint.data.token`, confirmado en vivo: el header real que
-#      llegó a backend fue `x-egress-token: Bearer eyJhbGci...`). Sin este cambio, Authorino va a
-#      intentar parsear "Bearer eyJ..." completo como el JWT y va a fallar.
+#   2. credentials.customHeader.prefix -> NO SE AGREGA. Versión anterior de este archivo decía
+#      agregar "prefix: \"Bearer \"" porque el AuthPolicy de origen (EKS) mandaba el token con ese
+#      prefijo — CORREGIDO 2026-09-02: se confirmó en vivo (dirección OCP→EKS, mismo bug) que
+#      Authorino NO saca el prefijo automáticamente, y da UNAUTHENTICATED en el 100% de los casos
+#      si el token llega con "Bearer " adelante. El fix real fue del lado del ORIGEN: la
+#      AuthPolicy de EKS (vault-emisor-spiffe/authpolicy-vault-spiffe-ejemplo.yaml) ya no manda el
+#      prefijo — manda el JWT crudo. Este archivo (destino) no necesita el campo prefix para nada.
 #
 #   3. claims-esperados -> reescrito. Los claims custom del wristband (src_cluster, src_namespace,
 #      dst_service) NO EXISTEN en el JWT-SVID de Vault. El token real, decodificado en vivo, solo
@@ -64,7 +66,6 @@ spec:
         credentials:
           customHeader:
             name: x-egress-token
-            prefix: "Bearer "
     authorization:
       "claims-esperados":
         patternMatching:

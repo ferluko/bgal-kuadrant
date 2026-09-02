@@ -75,12 +75,15 @@ spec:
     response:
       success:
         headers:
-          # Reemplaza al x-egress-token del wristband original. Nombre de header a confirmar con
-          # el equipo destino — acá se deja igual que el original para no romper el contrato ya
-          # acordado, pero con Vault como emisor el estándar sería `Authorization: Bearer`.
+          # Reemplaza al x-egress-token del wristband original. SIN prefijo "Bearer " a propósito
+          # — CORREGIDO 2026-09-02: se probó con el prefijo (el estándar hubiera sido
+          # `Authorization: Bearer`), pero Authorino NO lo saca automáticamente al parsear el JWT
+          # (confirmado en vivo del lado OCP→EKS: con el prefijo, el 100% de los requests cruzando
+          # fallaban con UNAUTHENTICATED — Authorino intentaba parsear "Bearer eyJ..." completo
+          # como el JWT). El wristband original tampoco mandaba prefijo — mismo criterio acá.
           "x-egress-token":
             plain:
-              expression: '"Bearer " + auth.metadata.vault_mint.data.token'
+              expression: 'auth.metadata.vault_mint.data.token'
 ---
 # Verificación (mismo patrón que 05-authpolicy-wristband.yaml):
 #   kubectl -n poc-ingress-kuadrant get authpolicy egress-backend-vault-spiffe \

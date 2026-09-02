@@ -9,10 +9,12 @@
 #      (106d5461-f073-5fe0-1241-d5c8a5bf7cd2) entre las keys.
 #   2. credentials.customHeader.prefix -> el CRD instalado en este cluster (confirmado leyendo el
 #      schema real) SOLO acepta el campo "name", no "prefix" (a diferencia de lo documentado en el
-#      header original de 13b, que sí lo tenía como opción). Se omite el campo — Authorino
-#      aparentemente steriliza el prefijo "Bearer " por default al parsear el header, sin
-#      necesidad de configurarlo (mismo comportamiento implícito que ya funciona del lado OCP, que
-#      tampoco lo tiene configurado).
+#      header original de 13b, que sí lo tenía como opción). Se omite el campo.
+#      CORRECCIÓN 2026-09-02: la suposición original de que Authorino "steriliza el prefijo Bearer
+#      por default" era INCORRECTA — se confirmó en vivo (100% de fallo con UNAUTHENTICATED) que
+#      NO lo hace. La solución real es del lado del ORIGEN (OCP): la AuthPolicy que arma el header
+#      (poc-egress-kuadrant/origen/15-authpolicy-vault-spiffe.yaml) manda el JWT crudo, sin
+#      prefijo — no hace falta que este lado lo maneje de ninguna forma.
 #   3. claims-esperados reescrito contra sub (el SPIFFE ID) — src_cluster/src_namespace/dst_service
 #      ya no existen en el JWT-SVID de Vault. El token real, minteado y confirmado en vivo desde
 #      paas-arqlab con la identidad real de Authorino, decodifica a:

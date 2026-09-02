@@ -1,26 +1,21 @@
-# Cluster ORIGEN (paas-arqlab, OCP) — mismo patrón que
-# poc-ingress-kuadrant/vault-emisor-spiffe/13-vault-login-cronjob.yaml (EKS), roles invertidos.
-# Hace el login a Vault (auth/jwt-ocp) por fuera de Authorino, por la misma limitación real:
-# Authorino no tiene forma nativa de leer su propio SA token y meterlo en el body de un POST. Corre
-# con la MISMA ServiceAccount que Authorino (authorino-authorino) — confirmado en vivo que es esa,
-# no una de "egress-gw".
+# Cluster ORIGEN (paas-arqlab, OCP) — hace el login a Vault (auth/jwt-ocp) por fuera de Authorino,
+# misma limitación de siempre: Authorino no puede leer su propio SA token y meterlo en el body de
+# un POST. Corre con la MISMA ServiceAccount que Authorino (authorino-authorino) — es la identidad
+# que Vault espera validar.
 #
-# DIFERENCIA CLAVE respecto de la versión EKS: el mount es auth/jwt-ocp, no auth/jwt. Tuvo que ser
-# un mount aparte porque el issuer de paas-arqlab es "https://kubernetes.default.svc" — una
-# dirección INTERNA del cluster, no alcanzable desde Vault (a diferencia del issuer público de EKS
-# vía IRSA). Por eso auth/jwt-ocp está configurado con jwt_validation_pubkeys (claves estáticas,
-# sacadas una sola vez de /openid/v1/jwks) en vez de oidc_discovery_url — no depende de que Vault
-# pueda alcanzar la red interna de OCP en cada login. Ver vault-emisor-spiffe.md para el detalle
-# completo de por qué y cómo se armó.
+# DIFERENCIA respecto de la versión EKS (vault-emisor-spiffe/13-vault-login-cronjob.yaml): el
+# mount es auth/jwt-ocp, no auth/jwt. Mount aparte porque el issuer de paas-arqlab
+# (https://kubernetes.default.svc) es interno, no alcanzable desde Vault — auth/jwt-ocp usa
+# jwt_validation_pubkeys (claves estáticas, sacadas una vez de /openid/v1/jwks) en vez de
+# oidc_discovery_url.
 #
-# CONFIRMADO EN VIVO — 2026-09-02: login real con el SA token de un pod de authorino-authorino en
-# paas-arqlab contra auth/jwt-ocp/login (role authorino-egress-ocp) -> 200, con la policy acotada
-# correcta; mint contra spiffe/role/egress-gw-ocp/mintjwt con ese client_token -> 200, JWT-SVID
-# real (sub: spiffe://poc-egress.bancogalicia.com.ar/paas-arqlab/egress-gw). Falta aplicar ESTE
-# CronJob en vivo — no se pudo desde esta sesión (sin acceso CLI a OCP, solo consola).
-#
-# Frecuencia: cada 30 min (mismo fix aplicado del lado EKS — "*/50" NO es "cada 50 minutos", corre
-# en los minutos 0 y 50 de cada hora, intervalo irregular). TTL del token de Vault: 3600s (1h).
+# CONFIRMADO EN VIVO — 2026-09-02: aplicado, corre cada 30 min, deja el Secret poblado
+# correctamente. El mint (Authorino llamando a spiffe/role/egress-gw-ocp/mintjwt en cada request)
+# funciona pero de forma INTERMITENTE — ver la nota completa en 15-authpolicy-vault-spiffe.yaml.
+# Decisión del usuario (2026-09-02): dejar así por ahora, priorizando que el flujo funcione de
+# punta a punta; el fix de confiabilidad (mint pre-hecho en este mismo CronJob, servido por un
+# httpd local) queda preparado como propuesta aparte — ver
+# PROPUESTA-fix-latencia-mint-ocp.md en este mismo directorio, no aplicado todavía.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -36,8 +31,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: vault-login
-              # Placeholder — cualquier imagen con curl + kubectl + jq. Confirmar que oc/kubectl
-              # esté disponible en la imagen elegida para este cluster.
+              # Placeholder — cualquier imagen con curl + kubectl + jq.
               image: alpine/k8s:1.30.0
               command:
                 - sh
@@ -58,7 +52,8 @@ spec:
                     --from-literal=client_token="$CLIENT_TOKEN" \
                     --dry-run=client -o yaml | kubectl apply -f -
 ---
-# RBAC — mismo alcance mínimo que del lado EKS: solo este Secret puntual.
+# RBAC — el ServiceAccount authorino-authorino necesita permiso para crear/actualizar ESTE Secret
+# puntual. No dárselo de forma más amplia que esto.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -87,9 +82,7 @@ roleRef:
   name: vault-egress-token-ocp-writer
   apiGroup: rbac.authorization.k8s.io
 ---
-# Verificación (desde consola OCP, o oc si hay CLI):
+# Verificación:
 #   oc -n kuadrant-system get secret vault-egress-token-ocp -o jsonpath='{.data.client_token}' | base64 -d
 #   oc -n kuadrant-system get cronjob vault-egress-login-ocp
-#
-# Como con el de EKS: correr un Job manual una vez para no esperar el próximo horario:
 #   oc create job --from=cronjob/vault-egress-login-ocp vault-egress-login-ocp-manual -n kuadrant-system

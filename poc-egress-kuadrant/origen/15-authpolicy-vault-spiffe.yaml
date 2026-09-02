@@ -1,19 +1,38 @@
 # Cluster ORIGEN (paas-arqlab, OCP) — reemplazo del wristband self-signed (05-authpolicy-wristband.yaml)
 # por un JWT-SVID minteado por Vault. Mismo patrón que
 # poc-ingress-kuadrant/vault-emisor-spiffe/authpolicy-vault-spiffe-ejemplo.yaml (EKS), roles
-# invertidos. BORRADOR — no aplicado en vivo (sin acceso CLI a OCP desde esta sesión), pero cada
-# endpoint que usa SÍ está confirmado en vivo por separado: login real con SA token de
-# authorino-authorino en paas-arqlab -> 200, mint contra egress-gw-ocp -> 200, JWT-SVID con sub/aud
-# correctos (ver 14-vault-login-cronjob.yaml para el detalle completo de la prueba).
+# invertidos.
 #
 #   1. Login vía auth/jwt-ocp (mount separado de auth/jwt porque el issuer de OCP,
 #      https://kubernetes.default.svc, es interno — no alcanzable desde Vault; auth/jwt-ocp usa
-#      claves estáticas en vez de discovery en vivo, ver 14-vault-login-cronjob.yaml).
+#      claves estáticas en vez de discovery en vivo).
 #   2. La identidad que se valida es la de AUTHORINO MISMO en kuadrant-system de paas-arqlab
 #      (confirmado en vivo: serviceAccountName: authorino-authorino), no la de un consumer.
-#   3. Login separado del mint por la misma limitación de Authorino de siempre — CronJob aparte
-#      (14-vault-login-cronjob.yaml, mismo directorio) hace el login, Authorino solo hace el mint
-#      leyendo el resultado vía sharedSecretRef (header, no body).
+#   3. Login separado del mint por la limitación de Authorino de siempre — CronJob aparte
+#      (14-vault-login-cronjob.yaml) hace el login, Authorino hace el mint en cada request,
+#      leyendo el client_token vía sharedSecretRef (header, no body).
+#
+# CONFIRMADO EN VIVO — 2026-09-02: aplicado, Accepted+Enforced. Login + mint funcionan con la
+# identidad real (probado a mano desde la terminal de OCP antes de aplicar esto). Tráfico real
+# cruzando OCP→EKS confirmado, con el JWT-SVID real llegando a destino.
+#
+# CONOCIDO — NO RESUELTO (decisión del usuario: priorizar que funcione, fine-tuning después):
+# el mint es INTERMITENTE. La latencia real OCP->Vault es ~0.5s (medida en vivo), mientras que el
+# ext_authz de Kuadrant tiene un timeout fijo de 200ms. Cuando la llamada no entra en esa ventana,
+# Authorino cancela el contexto ("context canceled" en sus logs) y el request falla. Medido en
+# vivo: ~25% de fallo en una tanda de 15 requests seguidos (a veces entra por reuso de conexión
+# TLS ya "tibia", a veces no). Cuando falla del todo, el cliente ve 500 (UNAVAILABLE); en otros
+# casos observados, el request parece seguir sin token válido y lo rechaza el destino (EKS) con
+# 401 — no se aisló con certeza cuál de los dos comportamientos ocurre en cada caso.
+#
+# FIX DE LATENCIA APLICADO Y CONFIRMADO — 2026-09-02: metadata.http tiene un campo `cache` nativo
+# (confirmado leyendo el schema real del CRD: cache.key + cache.ttl, default ttl=60s). Con un key
+# constante (el mint siempre pide la misma audiencia) y un ttl de 250s (por debajo de los 300s del
+# mint), Authorino cachea el resultado y deja de golpear a Vault en cada request — una sola
+# llamada real por ventana de TTL, no por request. Mucho más simple que el CronJob+httpd de
+# PROPUESTA-fix-latencia-mint-ocp.md (ese diseño queda archivado como alternativa, no hizo falta).
+# CONFIRMADO EN VIVO: 29/29 requests cruzando a EKS con authorized:true después de aplicar esto,
+# cero fallos — el ~14-25% de fallo intermitente por timeout desapareció por completo.
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
@@ -45,6 +64,10 @@ spec:
               name: "X-Vault-Token"
           body:
             expression: '"{\"audience\": \"app2.paas-demo.bancogalicia.com.ar\"}"'
+        cache:
+          key:
+            value: "egress-gw-ocp"
+          ttl: 250
         priority: 0
 
     authorization:
@@ -56,21 +79,19 @@ spec:
     response:
       success:
         headers:
-          # Reemplaza al x-egress-token del wristband original. Con "Bearer " de prefijo, igual
-          # que la versión EKS — el AuthPolicy del lado destino (EKS) tiene que esperar ese
-          # prefijo en credentials.customHeader.prefix.
+          # SIN prefijo "Bearer " a propósito — Authorino NO lo saca automáticamente al parsear
+          # (confirmado en vivo, 2026-09-02: con el prefijo, el 100% de los requests que cruzaban
+          # a EKS fallaban con UNAUTHENTICATED/"falta o es invalido el token de egreso" — Authorino
+          # intentaba parsear el string completo "Bearer eyJ..." como el JWT). El wristband
+          # original tampoco mandaba prefijo — mismo criterio acá.
           "x-egress-token":
             plain:
-              expression: '"Bearer " + auth.metadata.vault_mint.data.token'
+              expression: 'auth.metadata.vault_mint.data.token'
 ---
-# Verificación (mismo patrón que el resto de este documento):
+# Verificación:
 #   oc -n poc-egress-kuadrant get authpolicy egress-backend-vault-spiffe \
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
-# Del lado destino (EKS), el AuthPolicy que valida (destino/13b-authpolicy-jwt-kuadrant.yaml)
-# cambia de JWKS estático (jwks-egress-origen) al JWKS de Vault:
-#   jwksUrl: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/admin/spiffe/spiffe/.well-known/keys"
-# y las claims-esperados de src_cluster/src_namespace/dst_service (ya no existen en el token) por
-# sub == "spiffe://poc-egress.bancogalicia.com.ar/paas-arqlab/egress-gw" — ver
-# destino/13c-authpolicy-jwt-vault-spiffe.yaml (mismo directorio, este cambio SÍ se puede aplicar
-# desde esta sesión, hay acceso CLI a EKS).
+# Del lado destino (EKS), el AuthPolicy que valida es destino/13c-authpolicy-jwt-vault-spiffe.yaml
+# (aplicado en vivo, Enforced) — jwksUrl al de Vault, claims-esperados contra sub en vez de los
+# claims custom del wristband viejo.
