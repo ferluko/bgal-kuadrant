@@ -1,17 +1,33 @@
-# El enforcement real: en Kubernetes, en cuanto UN pod queda seleccionado por
-# alguna NetworkPolicy de Ingress, pasa a ser deny-by-default excepto lo que
-# esa policy permita explícitamente — no hace falta una policy namespace-wide
-# aparte (`podSelector: {}`) para lograr el default-deny.
+# Dos policies por namespace, a propósito explícitas y separadas:
+#   1. deny-all-ingress-target-*: bloquea TODO ingress hacia target-a/target-b
+#      (ni mismo namespace ni cross-namespace) — sin reglas de ingress.
+#   2. allow-from-mesh-gw: reabre sólo lo necesario (mesh-gw -> target, :8080).
+# El resultado neto es el mismo que con una sola policy combinada (las
+# NetworkPolicy que seleccionan el mismo pod se OR-ean: la deny-all no quita
+# nada que la allow ya permita), pero queda auditable como dos pasos
+# separados: "negar todo" y después "permitir esto puntual".
 #
-# A PROPÓSITO no hay una policy `podSelector: {}` a nivel namespace: eso
-# seleccionaría TAMBIÉN a los pods de mesh-gw (viven en meshtest-a, mismo
-# namespace que target-a) y podría cortarles el status-port/health-check de
-# Istio o el push del control plane — el mismo tipo de error que ya vimos una
-# vez con una policy mal alcanzada sacando al propio Gateway del
-# EndpointSlice. Acá el podSelector de cada policy apunta solo a `target-a`/
-# `target-b`; ni el consumer ni mesh-gw quedan afectados.
-#
-# target-a: sólo acepta ingress en :8080 desde los pods de mesh-gw (mismo ns).
+# El podSelector de AMBAS policies apunta sólo a `target-a`/`target-b`, nunca
+# `podSelector: {}` a nivel namespace completo: eso seleccionaría TAMBIÉN a
+# los pods de mesh-gw (viven en meshtest-a, mismo namespace que target-a) y
+# podría cortarles el status-port/health-check de Istio o el push del control
+# plane — el mismo tipo de error que ya vimos una vez con una policy mal
+# alcanzada sacando al propio Gateway del EndpointSlice. Ni el consumer ni
+# mesh-gw quedan afectados por ninguna de las cuatro policies de este archivo.
+
+# target-a — 1) deny-all: sin reglas de ingress, bloquea todo hacia target-a.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress-target-a
+  namespace: meshtest-a
+spec:
+  podSelector:
+    matchLabels:
+      app: target-a
+  policyTypes: [Ingress]
+---
+# target-a — 2) allow: reabre sólo ingress en :8080 desde mesh-gw (mismo ns).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,8 +46,20 @@ spec:
       ports:
         - {protocol: TCP, port: 8080}
 ---
-# target-b: mesh-gw vive en OTRO namespace (meshtest-a) -> hace falta
-# namespaceSelector + podSelector combinados.
+# target-b — 1) deny-all: sin reglas de ingress, bloquea todo hacia target-b.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress-target-b
+  namespace: meshtest-b
+spec:
+  podSelector:
+    matchLabels:
+      app: target-b
+  policyTypes: [Ingress]
+---
+# target-b — 2) allow: mesh-gw vive en OTRO namespace (meshtest-a) -> hace
+# falta namespaceSelector + podSelector combinados.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
