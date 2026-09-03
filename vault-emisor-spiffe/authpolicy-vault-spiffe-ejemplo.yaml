@@ -63,6 +63,15 @@ spec:
               name: "X-Vault-Token"
           body:
             expression: '"{\"audience\": \"bff-eks.paas-demo.bancogalicia.com.ar\"}"'
+        # REQUIERE evaluatorCacheSize subido en el CR Authorino (a nivel cluster, no acá) — el
+        # default de 1MB no alcanza para una entrada de ~1KB como este JWT (límite real: 1/1024
+        # del tamaño del namespace de cache). Sin eso, cache.key/cache.ttl están bien configurados
+        # pero cada escritura falla silenciosamente (solo se ve con LogLevel: debug) y sigue
+        # minteando en vivo en cada request. Confirmado en vivo — ver vault-emisor-spiffe.md §2sexies.
+        cache:
+          key:
+            expression: '"egress-gw"'
+          ttl: 250
         priority: 0
 
     # No dejar pasar el request si Vault no devolvió un token.

@@ -64,9 +64,15 @@ spec:
               name: "X-Vault-Token"
           body:
             expression: '"{\"audience\": \"app2.paas-demo.bancogalicia.com.ar\"}"'
+        # REQUIERE evaluatorCacheSize subido en el CR Authorino (a nivel cluster, no acá) — el
+        # default de 1MB no alcanza para una entrada de ~1KB como este JWT (límite real: 1/1024
+        # del tamaño del namespace de cache). Sin eso, cache.key/cache.ttl están bien configurados
+        # pero cada escritura falla silenciosamente (solo se ve con LogLevel: debug) y sigue
+        # minteando en vivo en cada request — CONFIRMADO EN VIVO, el "100% de éxito" que se vio
+        # antes de este fix era timing/latencia de red favorable, no cache real.
         cache:
           key:
-            value: "egress-gw-ocp"
+            expression: '"egress-gw-ocp"'
           ttl: 250
         priority: 0
 

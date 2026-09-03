@@ -394,6 +394,42 @@ TTL. **Confirmado en vivo: 29/29 requests cruzando a EKS con `authorized:true`, 
 después de aplicar el cache. El diseño más robusto (mint pre-hecho, servido localmente) queda
 archivado como alternativa, no hizo falta.
 
+**Corrección importante — el cache no estaba funcionando de verdad al principio, en NINGUNA
+dirección.** Después de agregar el campo `cache` también del lado EKS→OCP (para comparar
+apples-to-apples) se confirmó con `iat` repetido en llamadas seguidas que **no cacheaba nada**, ni
+ahí ni (probablemente) del lado OCP tampoco — el "100% de éxito" visto antes fue timing/latencia
+de red favorable, no cache real. Se habilitó `LogLevel: debug` en Authorino (EKS) temporalmente
+para diagnosticar, y apareció la causa exacta:
+
+```
+"msg":"unable to store data in the cache","err":"size of key: egress-gw, value: 1042,
+err: The entry size is larger than 1/1024 of cache size"
+```
+
+El cache namespace de Authorino tiene un límite default de 1MB, con un tope por entrada de 1/1024
+de eso (~1KB) — y el JWT-SVID pesa 1042 bytes, apenas por encima. **Cada escritura al cache fallaba
+silenciosamente** (solo logueado en debug), así que siempre minteaba fresco, sin importar la
+config de `cache.key`/`cache.ttl` (esa parte sí estaba bien). Fix real: subir
+`spec.evaluatorCacheSize` en el CR `Authorino` (a nivel cluster, no por `AuthPolicy`) — se probó
+con `10` (10MB), resuelve el problema con margen de sobra. Aplicado en ambos clusters (EKS y OCP).
+`LogLevel` revertido a su valor original después de diagnosticar.
+
+**Latencia real con el cache YA funcionando de verdad** (antes de este fix, todos los números de
+latencia documentados arriba en realidad medían con mint en vivo en cada request en ambas
+direcciones — dato para tener en cuenta si se comparan con mediciones futuras):
+
+| Destino | Antes (mint en vivo) | Ahora (cache real) |
+|---|---|---|
+| EKS→OCP, local (EKS) | ~19.7ms p50 | ~12.5ms p50 |
+| EKS→OCP, cruzando a OCP | ~181ms p50 | ~170ms p50 (dominado por red, no por Vault) |
+| OCP→EKS, local (OCP) | ~176-192ms | **~10.8ms** estable |
+| OCP→EKS, cruzando a EKS | ~380-425ms | **~173ms** estable |
+
+El impacto es mucho mayor del lado OCP→EKS (caía directo el costo de los ~500ms a Vault desde
+on-prem) que del lado EKS→OCP (Vault desde EKS ya era rápido, ~40-50ms, así que ahorrarlo pesa
+menos sobre el total). 2-3 requests con latencia alta al inicio de cada tanda de prueba son
+cache-miss esperables (primera llamada tras el fix, antes de que el cache tenga la entrada).
+
 **Estado final de esta dirección: funcional y confiable, ambos problemas encontrados (prefijo
 `"Bearer "` y latencia del mint) corregidos y confirmados en vivo con evidencia directa de logs.**
 

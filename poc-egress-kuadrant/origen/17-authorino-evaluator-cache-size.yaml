@@ -1,0 +1,45 @@
+# Cluster ORIGEN (paas-arqlab, OCP) — override declarativo del CR Authorino real (a nivel
+# CLUSTER, no de esta PoC puntual — afecta a TODAS las AuthPolicy del cluster que usen `cache` en
+# algún metadata.http, no solo egress-backend-vault-spiffe).
+#
+# El operador de Kuadrant crea su propio Authorino CR con defaults al reconciliar el CR Kuadrant
+# (mismo mecanismo que en EKS). El chart de Helm de kuadrant-operator NO expone forma de
+# configurar esto vía values.yaml (confirmado: "For its first iteration, this chart won't be
+# configurable with helm settings", 1.4.1) — así que la única vía declarativa es este CR aparte.
+#
+# POR QUÉ HACE FALTA: el default de evaluatorCacheSize es 1 (MB). Con ese valor, el cache de
+# metadata.http (usado por la AuthPolicy que mintea el JWT-SVID de Vault,
+# 15-authpolicy-vault-spiffe.yaml) rechaza silenciosamente cualquier entrada de más de ~1KB
+# (límite real: 1/1024 del tamaño del namespace de cache) — el JWT-SVID pesa ~1KB, así que CADA
+# escritura al cache fallaba, sin importar cómo estuviera configurado cache.key/cache.ttl en la
+# AuthPolicy. Confirmado en vivo con LogLevel: debug del lado EKS (mismo bug, mismo mecanismo) —
+# ver vault-emisor-spiffe/vault-emisor-spiffe.md §2sexies para el diagnóstico completo.
+#
+# Equivalente Terraform (mismo cambio, cluster EKS): platform-gateway.tf,
+# resource "kubectl_manifest" "authorino".
+#
+# APLICADO YA A MANO (kubectl/oc patch, 2026-09-02) — este archivo es para que quede declarativo
+# en vez de un parche suelto. Si ya está aplicado el patch, aplicar esto no debería cambiar nada
+# en la práctica (mismo valor), solo fija el estado en un YAML versionado.
+apiVersion: operator.authorino.kuadrant.io/v1beta1
+kind: Authorino
+metadata:
+  name: authorino
+  namespace: kuadrant-system
+spec:
+  clusterWide: true
+  evaluatorCacheSize: 10
+  listener:
+    tls:
+      enabled: false
+  oidcServer:
+    tls:
+      enabled: false
+  supersedingHostSubsets: true
+---
+# Verificación:
+#   oc get authorino authorino -n kuadrant-system -o jsonpath='{.spec.evaluatorCacheSize}{"\n"}'
+#   oc rollout status deployment authorino -n kuadrant-system
+#
+# Aplicar:
+#   oc apply -f 17-authorino-evaluator-cache-size.yaml
