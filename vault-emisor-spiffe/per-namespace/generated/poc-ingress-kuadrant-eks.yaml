@@ -1,0 +1,85 @@
+# GENERADO por generate-namespace-signer.sh a partir de 01-namespace-signer-template.yaml
+# namespace=poc-ingress-kuadrant direccion=eks mount=auth/jwt vault_role=authorino-egress
+# spiffe_role=egress-gw secret=vault-egress-token-poc-ingress-kuadrant (en kuadrant-system)
+# NO editar a mano — volver a generar si cambian los parametros. Estado: NO probado en vivo
+# todavia (ver vault-emisor-spiffe/per-namespace/README.md).
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-egress-signer
+  namespace: poc-ingress-kuadrant
+  labels:
+    app.kubernetes.io/part-of: vault-signer-per-namespace
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-egress-login-poc-ingress-kuadrant
+  namespace: poc-ingress-kuadrant
+  labels:
+    app.kubernetes.io/part-of: vault-signer-per-namespace
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: vault-egress-signer
+          restartPolicy: OnFailure
+          containers:
+            - name: vault-login
+              image: alpine/k8s:1.30.0
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  RESP=$(curl -sS -X POST \
+                    "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/auth/jwt/login" \
+                    -H "X-Vault-Namespace: admin/spiffe" \
+                    -d "{\"role\": \"authorino-egress\", \"jwt\": \"${SA_TOKEN}\"}")
+                  CLIENT_TOKEN=$(echo "$RESP" | jq -r '.auth.client_token')
+                  if [ -z "$CLIENT_TOKEN" ] || [ "$CLIENT_TOKEN" = "null" ]; then
+                    echo "login failed: $RESP" >&2
+                    exit 1
+                  fi
+                  kubectl -n kuadrant-system create secret generic vault-egress-token-poc-ingress-kuadrant \
+                    --from-literal=client_token="$CLIENT_TOKEN" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+---
+# RBAC cross-namespace: la SA de poc-ingress-kuadrant escribe UN secret puntual en kuadrant-system.
+# No se le da ningun permiso dentro de su propio namespace — no lo necesita.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-egress-token-poc-ingress-kuadrant-writer
+  namespace: kuadrant-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["vault-egress-token-poc-ingress-kuadrant"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-egress-token-poc-ingress-kuadrant-writer
+  namespace: kuadrant-system
+subjects:
+  - kind: ServiceAccount
+    name: vault-egress-signer
+    namespace: poc-ingress-kuadrant
+roleRef:
+  kind: Role
+  name: vault-egress-token-poc-ingress-kuadrant-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Verificacion (mismo patron que 13/14):
+#   kubectl -n kuadrant-system get secret vault-egress-token-poc-ingress-kuadrant -o jsonpath='{.data.client_token}' | base64 -d
+#   kubectl -n poc-ingress-kuadrant get cronjob vault-egress-login-poc-ingress-kuadrant
+#   kubectl create job --from=cronjob/vault-egress-login-poc-ingress-kuadrant vault-egress-login-poc-ingress-kuadrant-manual -n poc-ingress-kuadrant

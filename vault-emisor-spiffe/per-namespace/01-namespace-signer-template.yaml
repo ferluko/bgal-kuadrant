@@ -1,0 +1,99 @@
+# Template generico de "vault-signer por namespace". NO aplicar directamente — usar
+# generate-namespace-signer.sh para renderizar los placeholders. Sigue el mismo patron ya
+# confirmado en vivo en 13-vault-login-cronjob.yaml (EKS) / 14-vault-login-cronjob.yaml (OCP),
+# con dos diferencias deliberadas:
+#   1. La ServiceAccount y el CronJob corren DENTRO de __NAMESPACE__ (no en kuadrant-system) — es
+#      la identidad namespace-scoped que Vault verifica via TokenReview/OIDC.
+#   2. El Secret resultante se sigue escribiendo en kuadrant-system (mismo patron confirmado), pero
+#      con nombre __SECRET_NAME__ (namespaced), via una RoleBinding cross-namespace cuyo subject es
+#      la ServiceAccount de __NAMESPACE__ — soportado nativamente por RBAC.
+#
+# Placeholders:
+#   __NAMESPACE__     namespace del caller (ej: poc-egress-kuadrant)
+#   __DIRECTION__     eks | ocp  (solo informativo, va en labels/comentarios)
+#   __MOUNT__         auth/jwt | auth/jwt-ocp
+#   __VAULT_ROLE__    authorino-egress | authorino-egress-ocp
+#   __SPIFFE_ROLE__   egress-gw | egress-gw-ocp
+#   __SECRET_NAME__   vault-egress-token-__NAMESPACE__
+#   __CLUSTER_NS__    namespace donde vive Authorino (siempre kuadrant-system en este PoC)
+#   __VAULT_ADDR__    URL del cluster Vault (misma que usan 13/14 hoy)
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-egress-signer
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: vault-signer-per-namespace
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-egress-login-__NAMESPACE__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: vault-signer-per-namespace
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: vault-egress-signer
+          restartPolicy: OnFailure
+          containers:
+            - name: vault-login
+              image: alpine/k8s:1.30.0
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  RESP=$(curl -sS -X POST \
+                    "__VAULT_ADDR__/v1/__MOUNT__/login" \
+                    -H "X-Vault-Namespace: admin/spiffe" \
+                    -d "{\"role\": \"__VAULT_ROLE__\", \"jwt\": \"${SA_TOKEN}\"}")
+                  CLIENT_TOKEN=$(echo "$RESP" | jq -r '.auth.client_token')
+                  if [ -z "$CLIENT_TOKEN" ] || [ "$CLIENT_TOKEN" = "null" ]; then
+                    echo "login failed: $RESP" >&2
+                    exit 1
+                  fi
+                  kubectl -n __CLUSTER_NS__ create secret generic __SECRET_NAME__ \
+                    --from-literal=client_token="$CLIENT_TOKEN" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+---
+# RBAC cross-namespace: la SA de __NAMESPACE__ escribe UN secret puntual en __CLUSTER_NS__.
+# No se le da ningun permiso dentro de su propio namespace — no lo necesita.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: __SECRET_NAME__-writer
+  namespace: __CLUSTER_NS__
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["__SECRET_NAME__"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: __SECRET_NAME__-writer
+  namespace: __CLUSTER_NS__
+subjects:
+  - kind: ServiceAccount
+    name: vault-egress-signer
+    namespace: __NAMESPACE__
+roleRef:
+  kind: Role
+  name: __SECRET_NAME__-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Verificacion (mismo patron que 13/14):
+#   kubectl -n __CLUSTER_NS__ get secret __SECRET_NAME__ -o jsonpath='{.data.client_token}' | base64 -d
+#   kubectl -n __NAMESPACE__ get cronjob vault-egress-login-__NAMESPACE__
+#   kubectl create job --from=cronjob/vault-egress-login-__NAMESPACE__ vault-egress-login-__NAMESPACE__-manual -n __NAMESPACE__

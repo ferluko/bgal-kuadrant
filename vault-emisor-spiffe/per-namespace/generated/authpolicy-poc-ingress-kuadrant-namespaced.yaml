@@ -1,0 +1,73 @@
+# Cluster ORIGEN (EKS) — variante NAMESPACED de authpolicy-vault-spiffe-ejemplo.yaml (mismo
+# directorio del PoC, ../authpolicy-vault-spiffe-ejemplo.yaml). Ese archivo original QUEDA
+# INTACTO como referencia. Mismo criterio y mismo estado que el original: BORRADOR — no probado
+# en vivo como AuthConfig real, pero cada endpoint que usa SI esta confirmado en vivo por
+# separado (login, mint, discovery, JWKS — ver vault-emisor-spiffe.md §2bis).
+#
+# Diferencia con el original: en vez del Secret compartido `vault-egress-token` (poblado con la
+# identidad unica authorino-authorino/kuadrant-system, igual para cualquier namespace), usa el
+# Secret propio de este namespace (`vault-egress-token-poc-ingress-kuadrant`), poblado por el
+# CronJob namespace-scoped de generated/poc-ingress-kuadrant-eks.yaml — ver README.md de este
+# mismo directorio para el diseno completo.
+#
+# Requiere haber corrido 00-vault-bootstrap-namespaced.sh poc-ingress-kuadrant eks (agrega este
+# namespace + la SA vault-egress-signer al bound_claims del role auth/jwt compartido, y actualiza
+# el template del spiffe role egress-gw para incluir el namespace verificado en el sub).
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: egress-backend-vault-spiffe-namespaced
+  namespace: poc-ingress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: egress-backend
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+
+    metadata:
+      "vault_mint":
+        http:
+          url: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/spiffe/role/egress-gw/mintjwt"
+          method: POST
+          headers:
+            "X-Vault-Namespace":
+              value: "admin/spiffe"
+          sharedSecretRef:
+            name: vault-egress-token-poc-ingress-kuadrant
+            key: client_token
+          credentials:
+            customHeader:
+              name: "X-Vault-Token"
+          body:
+            expression: '"{\"audience\": \"bff-eks.paas-demo.bancogalicia.com.ar\"}"'
+        cache:
+          key:
+            value: "egress-gw-poc-ingress-kuadrant"
+          ttl: 250
+        priority: 0
+
+    authorization:
+      "vault_mint_check":
+        patternMatching:
+          patterns:
+            - predicate: "has(auth.metadata.vault_mint.data.token)"
+
+    response:
+      success:
+        headers:
+          # SIN prefijo "Bearer " a proposito — mismo criterio confirmado del lado OCP->EKS.
+          "x-egress-token":
+            plain:
+              expression: 'auth.metadata.vault_mint.data.token'
+---
+# Verificacion (mismo patron que el resto del PoC):
+#   kubectl -n poc-ingress-kuadrant get authpolicy egress-backend-vault-spiffe-namespaced \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
+#
+# Del lado destino (OCP), ajustar la validacion de claims para exigir el prefijo namespaced en el
+# sub, por ejemplo:
+#   predicate: 'auth.identity.sub.startsWith("spiffe://bancogalicia.com.ar/ns/poc-ingress-kuadrant/")'
