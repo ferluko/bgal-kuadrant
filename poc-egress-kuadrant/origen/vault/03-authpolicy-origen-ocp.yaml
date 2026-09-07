@@ -1,6 +1,6 @@
 # Cluster ORIGEN (paas-arqlab, OCP) — reemplazo del wristband self-signed (05-authpolicy-wristband.yaml)
 # por un JWT-SVID minteado por Vault. Mismo patrón que
-# poc-ingress-kuadrant/vault-emisor-spiffe/authpolicy-vault-spiffe-ejemplo.yaml (EKS), roles
+# poc-ingress-kuadrant/eks-origen/vault/01-authpolicy-origen-eks.yaml (EKS), roles
 # invertidos.
 #
 #   1. Login vía auth/jwt-ocp (mount separado de auth/jwt porque el issuer de OCP,
@@ -98,6 +98,6 @@ spec:
 #   oc -n poc-egress-kuadrant get authpolicy egress-backend-vault-spiffe \
 #     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}{.status.conditions[?(@.type=="Enforced")].message}{"\n"}'
 #
-# Del lado destino (EKS), el AuthPolicy que valida es destino/13c-authpolicy-jwt-vault-spiffe.yaml
+# Del lado destino (EKS), el AuthPolicy que valida es ../../destino/vault/01-authpolicy-destino-eks.yaml
 # (aplicado en vivo, Enforced) — jwksUrl al de Vault, claims-esperados contra sub en vez de los
 # claims custom del wristband viejo.

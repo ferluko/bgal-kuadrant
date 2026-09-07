@@ -17,7 +17,7 @@ final quedó en Vault, ver conclusión abajo).
 ## 0. Nota de plataforma — ServiceAccounts `default` compartidas (hallazgo aparte, no bloqueante)
 
 Durante el diseño del `AuthConfig` real
-([`authpolicy-vault-spiffe-ejemplo.yaml`](authpolicy-vault-spiffe-ejemplo.yaml), misma carpeta)
+([`01-authpolicy-origen-eks.yaml`](../poc-ingress-kuadrant/eks-origen/vault/01-authpolicy-origen-eks.yaml))
 surgió que, hoy, prácticamente todos los workloads de este cluster corren bajo la ServiceAccount
 `default` del namespace, en vez de una dedicada por workload. Esto no es un problema de esta
 integración puntual — es una debilidad de higiene de identidad más general: cualquier mecanismo
@@ -26,7 +26,7 @@ Vault) no puede distinguir un workload de otro mientras compartan `default`.
 
 **No bloquea nada de lo de acá** — la integración con Vault sigue adelante usando la identidad de
 Authorino mismo (que sí tiene una SA dedicada, `authorino-authorino` — ver
-`authpolicy-vault-spiffe-ejemplo.yaml` y `13-vault-login-cronjob.yaml`). Queda anotado como
+`poc-ingress-kuadrant/eks-origen/vault/01-authpolicy-origen-eks.yaml` y `02-vault-login-cronjob-eks.yaml`). Queda anotado como
 antecedente para una iniciativa de plataforma aparte (SA dedicada por Deployment), no como parte
 del alcance de este documento.
 
@@ -140,8 +140,8 @@ A partir de §2bis (mint/discovery/JWKS confirmados de forma aislada) se armó y
 integración real, reemplazando el wristband self-signed (`05-authpolicy-wristband.yaml`) por este
 mecanismo en el cluster origen (EKS, `cilium-1-35`). Detalle completo, incluyendo el diseño y las
 correcciones de arquitectura sobre la marcha, en
-[`authpolicy-vault-spiffe-ejemplo.yaml`](authpolicy-vault-spiffe-ejemplo.yaml) y
-[`13-vault-login-cronjob.yaml`](13-vault-login-cronjob.yaml). Resumen de lo que quedó funcionando:
+[`01-authpolicy-origen-eks.yaml`](../poc-ingress-kuadrant/eks-origen/vault/01-authpolicy-origen-eks.yaml) y
+[`02-vault-login-cronjob-eks.yaml`](../poc-ingress-kuadrant/eks-origen/vault/02-vault-login-cronjob-eks.yaml). Resumen de lo que quedó funcionando:
 
 **Decisión de login — `auth/jwt`, no `AppRole`, por sugerencia de Seginf** (escala mejor, no
 depende de `TokenReview` por diseño, y no hay ningún secreto que gestionar — el propio SA token de
@@ -212,7 +212,7 @@ emitido por Vault.**
 [`poc-ingress-kuadrant/ocp-destino/13-authpolicy-jwt-rhcl.yaml`](../poc-ingress-kuadrant/ocp-destino/13-authpolicy-jwt-rhcl.yaml)
 de este mismo repo), pero sigue apuntado al wristband viejo. El reemplazo ya está armado como
 borrador en
-[`13-authpolicy-jwt-rhcl-vault-spiffe.yaml`](../poc-ingress-kuadrant/ocp-destino/13-authpolicy-jwt-rhcl-vault-spiffe.yaml),
+[`03-authpolicy-destino-ocp.yaml`](../poc-ingress-kuadrant/ocp-destino/vault/01-authpolicy-destino-ocp.yaml),
 mismo directorio, con cada cambio documentado:
 
 1. `jwksUrl` → JWKS real de Vault (confirmado en vivo: `200`, con el `kid` del token real
@@ -305,7 +305,7 @@ las hace evaluar siempre `true` (o error silencioso tratado como éxito), o que 
 aplicando ese bloque en absoluto pese a mostrar `Enforced: True`. No se pudo diagnosticar más sin
 logs de Authorino/kuadrant-operator del lado OCP en el momento exacto de una de estas pruebas.
 
-**Hallazgo aparte, ya corregido**: el `CronJob` (`13-vault-login-cronjob.yaml`) tiene un bug de
+**Hallazgo aparte, ya corregido**: el `CronJob` (`poc-ingress-kuadrant/eks-origen/vault/02-vault-login-cronjob-eks.yaml`) tiene un bug de
 schedule — `*/50 * * * *` en el campo de minutos corre en los minutos **0 y 50** de cada hora
 (intervalo irregular: 10 min entre `:50`→`:00`, luego 50 min entre `:00`→`:50`), no "cada 50
 minutos" parejo como decía el comentario original. No es grave (el TTL del token es 1h, así que
@@ -353,8 +353,8 @@ tráfico?" (sí) vs. "¿rechaza lo que tiene que rechazar?" (no, confirmado que 
 
 Mismo mecanismo, roles invertidos: origen `poc-egress-kuadrant` (OCP, `paas-arqlab`), destino
 `poc-egress-kuadrant/destino` (EKS). Detalle completo en
-[`poc-egress-kuadrant/origen/15-authpolicy-vault-spiffe.yaml`](../poc-egress-kuadrant/origen/15-authpolicy-vault-spiffe.yaml)
-y [`14-vault-login-cronjob.yaml`](../poc-egress-kuadrant/origen/14-vault-login-cronjob.yaml).
+[`poc-egress-kuadrant/origen/vault/03-authpolicy-origen-ocp.yaml`](../poc-egress-kuadrant/origen/vault/03-authpolicy-origen-ocp.yaml)
+y [`01-vault-login-cronjob-ocp.yaml`](../poc-egress-kuadrant/origen/vault/01-vault-login-cronjob-ocp.yaml).
 Resumen:
 
 - `auth/jwt-ocp` (mount separado de `auth/jwt`) porque el issuer de OCP,
@@ -367,7 +367,7 @@ Resumen:
      de 200ms en el `ext_authz` de Kuadrant. Falla intermitente, ~25% en una tanda de 15. Fix
      diseñado (mint pre-hecho por el `CronJob`, servido por un `httpd` local) pero **no aplicado**
      — decisión explícita de priorizar que funcione antes de optimizar. Ver
-     `poc-egress-kuadrant/origen/PROPUESTA-fix-latencia-mint-ocp.md`.
+     `poc-egress-kuadrant/origen/vault/PROPUESTA-fix-latencia-mint-ocp.md`.
   2. **Prefijo `"Bearer "` no soportado** — la suposición de que Authorino lo saca automáticamente
      al parsear el header (asumida en la dirección EKS→OCP, nunca verificada ahí porque OCP no
      estaba validando nada de todas formas, ver §2quater) resultó ser **incorrecta**. Confirmado
@@ -386,7 +386,7 @@ sí está verificado con evidencia directa (logs + hostname del pod), no inferid
 `Enforced` de la `AuthPolicy`.
 
 **Actualización — el problema de latencia también se resolvió, con un fix más simple del
-originalmente diseñado**: en vez del CronJob+httpd de `PROPUESTA-fix-latencia-mint-ocp.md`,
+originalmente diseñado**: en vez del CronJob+httpd de `poc-egress-kuadrant/origen/vault/PROPUESTA-fix-latencia-mint-ocp.md`,
 `metadata.http` en Authorino tiene un campo `cache` nativo (`cache.key` + `cache.ttl`, confirmado
 leyendo el schema real del CRD). Con un `key` constante y `ttl: 250` (por debajo de los 300s del
 mint), Authorino deja de golpear a Vault en cada request — una sola llamada real por ventana de

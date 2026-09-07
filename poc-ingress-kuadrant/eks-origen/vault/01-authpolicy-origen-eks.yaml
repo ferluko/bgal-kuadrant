@@ -1,7 +1,7 @@
 # Cluster ORIGEN (EKS) — reemplazo del wristband self-signed (05-authpolicy-wristband.yaml) por
 # un JWT-SVID minteado por Vault. BORRADOR — no probado en vivo como AuthConfig real (a diferencia
 # del resto del directorio), pero cada endpoint que usa SÍ está confirmado en vivo por separado
-# (login, mint, discovery, JWKS — ver vault-emisor-spiffe/vault-emisor-spiffe.md §2bis).
+# (login, mint, discovery, JWKS — ver ../../../vault-emisor-spiffe/vault-emisor-spiffe.md §2bis).
 #
 # CAMBIOS respecto de la versión anterior de este archivo:
 #   1. Login vía `auth/jwt`, no AppRole — decisión de seginf (escala mejor, no depende de
@@ -17,7 +17,7 @@
 #      dentro de una AuthConfig) — no tiene solución declarativa, es un límite real de Authorino,
 #      no algo que faltaba buscar bien (ver el comentario largo en `metadata` más abajo). Se separó
 #      el login del mint: el login lo hace un CronJob aparte
-#      (`13-vault-login-cronjob.yaml`, mismo directorio), Authorino solo hace el mint, leyendo el
+#      (`02-vault-login-cronjob-eks.yaml`, mismo directorio), Authorino solo hace el mint, leyendo el
 #      resultado del login vía `sharedSecretRef` — que sí es 100% nativo, porque ahí el dato va en
 #      un header, no en el body.
 apiVersion: kuadrant.io/v1
@@ -44,7 +44,7 @@ spec:
       # JWT en el body para /v1/auth/jwt/login). Es un límite real de Authorino, no algo que
       # faltaba configurar bien.
       #
-      # La solución: separar el login del mint. Un CronJob aparte (ver 13-vault-login-cronjob.yaml
+      # La solución: separar el login del mint. Un CronJob aparte (ver 02-vault-login-cronjob-eks.yaml
       # en este mismo directorio) hace el login cada ~50 min y deja el client_token en un Secret.
       # Authorino solo hace el mint (paso 2), que SÍ encaja 100% con lo que Authorino soporta
       # nativamente, porque el X-Vault-Token va en un header, no en el body.
@@ -67,7 +67,8 @@ spec:
         # default de 1MB no alcanza para una entrada de ~1KB como este JWT (límite real: 1/1024
         # del tamaño del namespace de cache). Sin eso, cache.key/cache.ttl están bien configurados
         # pero cada escritura falla silenciosamente (solo se ve con LogLevel: debug) y sigue
-        # minteando en vivo en cada request. Confirmado en vivo — ver vault-emisor-spiffe.md §2sexies.
+        # minteando en vivo en cada request. Confirmado en vivo — ver
+        # ../../../vault-emisor-spiffe/vault-emisor-spiffe.md §2sexies.
         cache:
           key:
             expression: '"egress-gw"'
@@ -141,7 +142,7 @@ spec:
 #   se creó "egress-gw" limpio, sin el sufijo, que es el que usa este AuthPolicy y la policy.)
 #
 # PENDIENTE (fuera del alcance de esta sesión, requiere acceso al cluster destino):
-#   - Aplicar 13-vault-login-cronjob.yaml (CronJob + RBAC) en kuadrant-system.
+#   - Aplicar 02-vault-login-cronjob-eks.yaml (CronJob + RBAC) en kuadrant-system.
 #   - Aplicar este AuthPolicy sobre la ruta egress-backend real en poc-ingress-kuadrant.
 #   - Cambiar el issuerUrl del lado OCP (destino) al discovery de Vault — alguien con acceso a
 #     ese cluster tiene que hacerlo, no se puede desde acá.

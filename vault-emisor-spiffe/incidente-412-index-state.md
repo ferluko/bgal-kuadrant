@@ -15,7 +15,7 @@ hace falta escalar; queda documentado como antecedente por si vuelve a pasar.
 ## Resumen
 
 Al crear el `Role` `authorino-egress` en el mount `auth/jwt` (paso siguiente del plan en
-[`authpolicy-vault-spiffe-ejemplo.yaml`](authpolicy-vault-spiffe-ejemplo.yaml), pedido pendiente
+[`01-authpolicy-origen-eks.yaml`](../poc-ingress-kuadrant/eks-origen/vault/01-authpolicy-origen-eks.yaml), pedido pendiente
 punto 2), el `POST /v1/auth/jwt/role/authorino-egress` devolvió:
 
 ```
@@ -54,4 +54,4 @@ armando nosotros.
 - Confirmar con Seginf si es un incidente conocido del lado de HCP para este cluster/namespace.
 - Una vez resuelto, reintentar sin cambios el `POST /auth/jwt/role/authorino-egress` documentado
   en el punto 2 del "PEDIDO PENDIENTE PARA SEGINF" de
-  [`authpolicy-vault-spiffe-ejemplo.yaml`](authpolicy-vault-spiffe-ejemplo.yaml).
+  [`01-authpolicy-origen-eks.yaml`](../poc-ingress-kuadrant/eks-origen/vault/01-authpolicy-origen-eks.yaml).

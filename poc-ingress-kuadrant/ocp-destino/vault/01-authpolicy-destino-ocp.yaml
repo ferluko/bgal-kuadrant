@@ -1,6 +1,6 @@
 # Cluster DESTINO (OCP) — BORRADOR, actualiza 13-authpolicy-jwt-rhcl.yaml para validar el
 # JWT-SVID minteado por Vault (spiffe secrets engine) en vez del wristband self-signed viejo.
-# Ver vault-emisor-spiffe/vault-emisor-spiffe.md §2ter para el contexto completo del lado EKS,
+# Ver ../../../vault-emisor-spiffe/vault-emisor-spiffe.md §2ter para el contexto completo del lado EKS,
 # ya desplegado y confirmado en vivo (2026-09-02) — este archivo es lo que falta del lado OCP,
 # que no se puede aplicar desde esta sesión por falta de acceso a ese cluster.
 #
@@ -25,7 +25,7 @@
 #      prefijo — CORREGIDO 2026-09-02: se confirmó en vivo (dirección OCP→EKS, mismo bug) que
 #      Authorino NO saca el prefijo automáticamente, y da UNAUTHENTICATED en el 100% de los casos
 #      si el token llega con "Bearer " adelante. El fix real fue del lado del ORIGEN: la
-#      AuthPolicy de EKS (vault-emisor-spiffe/authpolicy-vault-spiffe-ejemplo.yaml) ya no manda el
+#      AuthPolicy de EKS (../../eks-origen/vault/01-authpolicy-origen-eks.yaml) ya no manda el
 #      prefijo — manda el JWT crudo. Este archivo (destino) no necesita el campo prefix para nada.
 #
 #   3. claims-esperados -> reescrito. Los claims custom del wristband (src_cluster, src_namespace,

@@ -1,6 +1,6 @@
 # Cluster DESTINO (EKS, cilium-1-35) — actualiza 13b-authpolicy-jwt-kuadrant.yaml para validar el
 # JWT-SVID minteado por Vault (spiffe secrets engine) en vez del wristband self-signed viejo.
-# Mismo patrón que poc-ingress-kuadrant/ocp-destino/13-authpolicy-jwt-rhcl-vault-spiffe.yaml
+# Mismo patrón que poc-ingress-kuadrant/ocp-destino/vault/01-authpolicy-destino-ocp.yaml
 # (misma corrección, dirección inversa) — ver ese archivo para el detalle completo de por qué cada
 # cambio, acá el resumen:
 #
@@ -13,7 +13,7 @@
 #      CORRECCIÓN 2026-09-02: la suposición original de que Authorino "steriliza el prefijo Bearer
 #      por default" era INCORRECTA — se confirmó en vivo (100% de fallo con UNAUTHENTICATED) que
 #      NO lo hace. La solución real es del lado del ORIGEN (OCP): la AuthPolicy que arma el header
-#      (poc-egress-kuadrant/origen/15-authpolicy-vault-spiffe.yaml) manda el JWT crudo, sin
+#      (../../origen/vault/03-authpolicy-origen-ocp.yaml) manda el JWT crudo, sin
 #      prefijo — no hace falta que este lado lo maneje de ninguna forma.
 #   3. claims-esperados reescrito contra sub (el SPIFFE ID) — src_cluster/src_namespace/dst_service
 #      ya no existen en el JWT-SVID de Vault. El token real, minteado y confirmado en vivo desde

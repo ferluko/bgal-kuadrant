@@ -3,19 +3,19 @@
 # un POST. Corre con la MISMA ServiceAccount que Authorino (authorino-authorino) — es la identidad
 # que Vault espera validar.
 #
-# DIFERENCIA respecto de la versión EKS (vault-emisor-spiffe/13-vault-login-cronjob.yaml): el
+# DIFERENCIA respecto de la versión EKS (poc-ingress-kuadrant/eks-origen/vault/02-vault-login-cronjob-eks.yaml): el
 # mount es auth/jwt-ocp, no auth/jwt. Mount aparte porque el issuer de paas-arqlab
 # (https://kubernetes.default.svc) es interno, no alcanzable desde Vault — auth/jwt-ocp usa
 # jwt_validation_pubkeys (claves estáticas, sacadas una vez de /openid/v1/jwks) en vez de
 # oidc_discovery_url.
 #
 # CONFIRMADO EN VIVO — 2026-09-02: aplicado, corre cada 30 min, deja el Secret poblado
-# correctamente. El mint (Authorino llamando a spiffe/role/egress-gw-ocp/mintjwt en cada request)
-# funciona pero de forma INTERMITENTE — ver la nota completa en 15-authpolicy-vault-spiffe.yaml.
-# Decisión del usuario (2026-09-02): dejar así por ahora, priorizando que el flujo funcione de
-# punta a punta; el fix de confiabilidad (mint pre-hecho en este mismo CronJob, servido por un
-# httpd local) queda preparado como propuesta aparte — ver
-# PROPUESTA-fix-latencia-mint-ocp.md en este mismo directorio, no aplicado todavía.
+# correctamente. El mint (Authorino llamando a spiffe/role/egress-gw-ocp/mintjwt) arrancó
+# INTERMITENTE por un timeout de 200ms en el ext_authz de Kuadrant — RESUELTO después, sin tocar
+# este CronJob: el problema real era el tamaño del cache de Authorino
+# (02-authorino-evaluator-cache-size.yaml, mismo directorio), no la latencia en sí. Ver
+# 03-authpolicy-origen-ocp.yaml y PROPUESTA-fix-latencia-mint-ocp.md (diseño alternativo,
+# archivado, no hizo falta) para el detalle completo.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

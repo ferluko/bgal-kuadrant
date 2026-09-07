@@ -13,7 +13,7 @@
 # (límite real: 1/1024 del tamaño del namespace de cache) — el JWT-SVID pesa ~1KB, así que CADA
 # escritura al cache fallaba, sin importar cómo estuviera configurado cache.key/cache.ttl en la
 # AuthPolicy. Confirmado en vivo con LogLevel: debug del lado EKS (mismo bug, mismo mecanismo) —
-# ver vault-emisor-spiffe/vault-emisor-spiffe.md §2sexies para el diagnóstico completo.
+# ver ../../../vault-emisor-spiffe/vault-emisor-spiffe.md §2sexies para el diagnóstico completo.
 #
 # Equivalente Terraform (mismo cambio, cluster EKS): platform-gateway.tf,
 # resource "kubectl_manifest" "authorino".

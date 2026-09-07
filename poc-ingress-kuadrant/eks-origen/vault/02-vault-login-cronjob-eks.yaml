@@ -1,6 +1,6 @@
 # Cluster ORIGEN (EKS) — hace el login a Vault (auth/jwt) por fuera de Authorino, porque
 # Authorino no tiene forma nativa de leer su propio SA token y meterlo en el body de un POST
-# (ver la nota en authpolicy-vault-spiffe-ejemplo.yaml). Corre con la MISMA ServiceAccount que
+# (ver la nota en 01-authpolicy-origen-eks.yaml, mismo directorio). Corre con la MISMA ServiceAccount que
 # Authorino (authorino-authorino) — es la identidad que Vault espera validar (bound_subject
 # "system:serviceaccount:kuadrant-system:authorino-authorino").
 #
