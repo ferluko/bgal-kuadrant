@@ -1,15 +1,19 @@
-# ORIGEN paas-lab — el destino arqlab como servicio externo a la malla.
+# ORIGEN paas-lab — el ingreso de arqlab como servicio externo a la malla.
 #
-# VERIFICAR ANTES DE APLICAR: paas-lab YA tiene un ServiceEntry `backend-destino`
-# (lo vio el preflight). Casi seguro copiado de arqlab apuntando a app2.paas-demo...,
-# que resuelve al NLB de EKS — destino equivocado para esta prueba. Mirar qué host tiene:
+# app3.paas-demo.bancogalicia.com.ar ya apunta on-prem (verificado 2026-09-09):
+#   app3.paas-demo → CNAME shard1.paas-demo → 10.254.124.36
+#   PTR de esa IP: *.apps.paas-arqlab.bancogalicia.com.ar  y  shard1.paas-demo...
 #
-#   oc --context=<paas-lab> -n poc-egress-kuadrant get serviceentry backend-destino \
+# Se usa app3 como NOMBRE LÓGICO de este camino (paas-lab → arqlab) aunque por SNI se anuncie
+# otro nombre. Ver 04-destinationrule-tls.yaml: el SNI lo decide el certificado del listener,
+# no el nombre lógico. Istio soporta perfectamente sni != host.
+#
+# VERIFICAR ANTES DE APLICAR: paas-lab ya tiene un ServiceEntry `backend-destino` heredado de
+# arqlab, casi seguro apuntando a app2 (que resuelve al NLB de EKS). Mirar qué host tiene:
+#   oc --context=paas-lab -n poc-egress-kuadrant get serviceentry backend-destino \
 #     -o jsonpath='{.spec.hosts}{"\n"}'
-#
-# Si dice app2..., este archivo lo REEMPLAZA. Si querés conservar los dos destinos para
-# conmutar, dejá ambos ServiceEntry (hosts distintos) y conmutá por el backendRef del
-# HTTPRoute — pero acordate de mover TAMBIÉN la audiencia y la cache.key (ver README).
+# Si dice app2, este archivo NO lo reemplaza (nombre distinto): conviven, y se conmuta de
+# destino por el backendRef del HTTPRoute — moviendo TAMBIÉN audiencia y cache.key (README §5).
 apiVersion: networking.istio.io/v1
 kind: ServiceEntry
 metadata:
@@ -25,18 +29,3 @@ spec:
       name: http-for-tls-origination
       protocol: HTTP
       targetPort: 443
----
-# Si el CNAME app3 todavía no existe (ver preflight P4), usar resolution STATIC contra la
-# VIP del router de arqlab para no bloquearse esperando a DNS. Reemplaza al bloque de arriba:
-#
-# spec:
-#   hosts: ["app3.paas-demo.bancogalicia.com.ar"]
-#   location: MESH_EXTERNAL
-#   resolution: STATIC
-#   endpoints:
-#     - address: <VIP-router-arqlab>     # el preflight lo descubre y lo imprime
-#   ports:
-#     - number: 443
-#       name: http-for-tls-origination
-#       protocol: HTTP
-#       targetPort: 443

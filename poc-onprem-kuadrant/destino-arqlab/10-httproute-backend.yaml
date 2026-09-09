@@ -1,0 +1,55 @@
+# DESTINO arqlab — la única pieza de red que hace falta del lado destino.
+#
+# CAMBIO DE DISEÑO (2026-09-09): antes acá había un Gateway `openshift-default` propio + una
+# Route de passthrough. Se descartaron. El motivo por el que existían era esquivar el bloqueo
+# de SDS del runbook §7.2 (el 443 de gw-hostnet no recibía el certificado). Ese bloqueo YA NO
+# EXISTE — ver 11-DESCARTADO-gateway-propio.md. Con el 443 funcionando, reusar gw-hostnet es
+# estrictamente mejor: menos piezas, sin Route, sin Service nuevo, sin wildcard nuevo, y es el
+# camino de ingreso REAL de la plataforma (hostNetwork detrás de F5), no uno paralelo de PoC.
+#
+# Evidencia del estado del gateway:
+#   listener https:443  Accepted=True Programmed=True ResolvedRefs=True  attachedRoutes=3
+#   certificateRefs: Secret/shard1-paas-demo, mode Terminate
+#
+# POR QUÉ ESTE hostname Y NO app3: el gateway de egreso NO reescribe el Host. Lo que llega es
+# literalmente el FQDN interno del ORIGEN. Y acá está la diferencia que hace que esto no choque
+# con nada de lo que ya existe:
+#
+#   paas-lab  (ns poc-egress-kuadrant)  -> Host: backend.poc-egress-kuadrant.svc.cluster.local
+#   EKS       (ns poc-ingress-kuadrant) -> Host: backend.poc-ingress-kuadrant.svc.cluster.local
+#
+# Son hostnames DISTINTOS, así que esta HTTPRoute convive con la `backend` que ya atiende el
+# tráfico de EKS sobre el mismo gateway, sin conflicto y sin tocarla.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: backend-lab
+  namespace: poc-ingress-kuadrant
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw-hostnet
+      namespace: connlink-ingress
+      # SIN sectionName a propósito: así se attachea a los DOS listeners (80 y 443), igual que
+      # hace bff-ingress ("Route was valid, bound to 2 parents"). El tráfico real entra por 443;
+      # tener el 80 sirve para diagnosticar sin TLS de por medio.
+  hostnames:
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend
+          port: 8080
+---
+# VERIFICAR que quedó bound a los dos parents y con refs resueltas:
+#   oc --context=paas-arqlab -n poc-ingress-kuadrant get httproute backend-lab \
+#     -o jsonpath='{range .status.parents[*]}{.controllerName}{" "}{range .conditions[*]}{.type}={.status} {end}{"\n"}{end}'
+#
+# OJO CON EL PUERTO EN EL HOST: el origen manda "…cluster.local:8080". Gateway API matchea el
+# hostname sin puerto, así que esto es correcto — pero si ves 404 del gateway (no del F5), es el
+# primer lugar donde mirar, y es además la hipótesis abierta de la rama A de
+# 14-diagnostico-claims.md.

@@ -299,6 +299,36 @@ prueba). Revertido el cambio en Vault inmediatamente después de la prueba, conf
 real que el `sub` volvió a `.../poc/egress-gw`.
 
 **Esto es un hallazgo de seguridad real y confirmado, no un falso positivo de la prueba anterior.**
+
+### Actualización 2026-09-09 — dos hipótesis refutadas, y el dato que falta
+
+Se investigaron y **descartaron con evidencia** las dos explicaciones más plausibles. Quedan
+anotadas para que nadie las vuelva a recorrer:
+
+1. **Poda silenciosa del campo `predicate` por deriva de schema del CRD.** Refutada: los tres
+   predicados están completos en el objeto guardado
+   (`oc get authpolicy … -o json | jq '..|.predicate? // empty'`).
+2. **istiod no le empuja el `ext_authz` al gateway desplegado a mano.** Refutada: el
+   `config_dump` del Envoy de `gw-hostnet` tiene 63 `authorino`, 7 `ext_authz` y 149 `kuadrant`.
+   Esta hipótesis pretendía además unificar este hallazgo con el bloqueo de SDS del runbook
+   §7.2 — no van juntos, y ese bloqueo se resolvió por su cuenta (runbook §7.2, actualizado).
+
+Con eso, el problema se parte en dos ramas mutuamente excluyentes, y hay **un solo dato** que
+decide cuál — el mismo que faltaba el 2026-09-02: **¿Authorino llegó a ver el request?**
+
+- **No lo vio** → el wasm-shim no matcheó el request contra ninguna action set y lo dejó pasar
+  sin evaluar. Hipótesis principal de esa rama: el `:authority` llega con puerto
+  (`…svc.cluster.local:8080`, porque el egreso no reescribe el Host) y el `HTTPRoute` declara el
+  hostname sin puerto. Explicaría los cuatro síntomas juntos, incluido que no haya error en
+  ningún log.
+- **Lo vio y devolvió `authorized:true`** → la evaluación es el problema (candidato principal:
+  `aud` tratado como string, donde `in` en CEL hace substring match).
+
+Árbol de decisión completo, con los comandos de cada rama y la forma correcta de repetir la
+prueba negativa (incluido el `rollout restart` que faltó, sin el cual se prueba con el token
+viejo cacheado), en
+[`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md).
+
 Pendiente para el equipo con acceso a OCP: revisar por qué el bloque `authorization.claims-esperados`
 del `AuthPolicy` no está bloqueando nada — candidatos: error de sintaxis en las expresiones CEL que
 las hace evaluar siempre `true` (o error silencioso tratado como éxito), o que Kuadrant no esté

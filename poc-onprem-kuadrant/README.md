@@ -1,56 +1,81 @@
 # PoC on-prem — `paas-lab` → `paas-arqlab`, con Vault como emisor
 
-Tercer cluster de la PoC. `paas-lab` (OCP 4.18, on-prem) entra como **origen**: su `bff-cascada`
-consume `backend` sin cambiar la URL, y ese salto termina en `paas-arqlab` (OCP 4.21),
-autenticado con un JWT-SVID minteado por Vault.
+Tercer cluster de la PoC. `paas-lab` (OCP 4.18.45, on-prem) entra como **origen**: su
+`bff-cascada` consume `backend` sin cambiar la URL, y ese salto termina en `paas-arqlab`
+(OCP 4.21.30), autenticado con un JWT-SVID minteado por Vault.
 
-Es el primer cruce **on-prem → on-prem** de la PoC. Los otros dos existentes son
-`poc-egress-kuadrant` (arqlab → EKS) y `poc-ingress-kuadrant` (EKS → arqlab).
+Primer cruce **on-prem → on-prem** de la PoC. Los otros dos son `poc-egress-kuadrant`
+(arqlab → EKS) y `poc-ingress-kuadrant` (EKS → arqlab).
 
-## 1. Estado al 2026-09-09 (medido, no supuesto)
+## 1. Estado medido (no supuesto)
 
-Del preflight de federación (`scripts/preflight-paas-lab.sh`):
+Del preflight de federación (`scripts/preflight-paas-lab.sh`, 2026-09-09):
 
 | | |
 |---|---|
 | Federación con Vault | **funciona** — login con la SA real, policy acotada, mint OK, `kid` en el JWKS |
-| `sub` de paas-lab | `spiffe://poc-egress.bancogalicia.com.ar/paas-lab/egress-gw` (confirmado en vivo) |
-| Mount que autentica | `auth/jwt-paas-lab` — el `jwt-paas-lab1` del paso 2a quedó **huérfano**, borrarlo |
-| Latencia del mint | **483-486 ms**, las 5 muestras. Contra un ext_authz de **200 ms fijos** |
-| `evaluatorCacheSize` | **sin setear** → cache silenciosamente roto |
-| Camino de red | Gateway, HTTPRoute, ServiceEntry y DestinationRule montados |
-| AuthPolicy de origen | **no existe** — nada inyecta el token |
-| GatewayClass | `openshift-default` presente (OSSM3 3.3.7) → los manifiestos de arqlab portan |
+| `sub` de paas-lab | `spiffe://poc-egress.bancogalicia.com.ar/paas-lab/egress-gw` |
+| Mount que autentica | `auth/jwt-paas-lab`. El `jwt-paas-lab1` del paso 2a quedó **huérfano** — borrarlo |
+| Latencia del mint | **483-486 ms**, las 5 muestras, contra un ext_authz de **200 ms fijos** |
+| `evaluatorCacheSize` | **sin setear** → cache silenciosamente roto → BLOQUEANTE 1 |
+| AuthPolicy de origen | **no existe** → nada inyecta el token → BLOQUEANTE 2 |
+| Camino de red en el origen | Gateway, HTTPRoute, ServiceEntry y DestinationRule montados |
+| GatewayClass | `openshift-default` presente en 4.18 (OSSM3 3.3.7) |
+| CRD AuthPolicy | **sin** `credentials.customHeader.prefix` (dialecto upstream) — no usarlo igual |
 
-Los dos bloqueantes son `01-authorino-cache-size.yaml` y `02-authpolicy-origen.yaml`.
+## 2. Diseño del ingreso en arqlab — se reusa `gw-hostnet`
 
-## 2. Por qué un Gateway nuevo en arqlab y no `gw-hostnet`
+**Cambió el 2026-09-09.** La versión anterior de este documento montaba un `Gateway`
+`openshift-default` propio con una `Route` de passthrough, para esquivar el bloqueo de SDS del
+`runbook-gw-istio-hostnetwork.md` §7.2 (el 443 de `gw-hostnet` no recibía el certificado).
 
-`gw-hostnet` (ns `connlink-ingress`, class `ingress-hostnet`) hoy solo tiene listener HTTP:80.
-El 443 está bloqueado por el problema de SDS del `runbook-gw-istio-hostnetwork.md` §7.2. Sin TLS
-en el destino, el `DestinationRule` del origen no puede originar TLS.
+**Ese bloqueo está resuelto**: el listener `https:443` de `gw-hostnet` está
+`Accepted=True Programmed=True ResolvedRefs=True` con el Secret `shard1-paas-demo`, y ya tiene
+3 routes attacheadas. Con el 443 andando, el Gateway propio pasa a ser peor en todo — cuatro
+piezas nuevas contra una, un certificado más que mantener, y sobre todo un camino de red que
+**no es el de producción**, lo que vuelve menos concluyente cualquier cosa que se mida ahí.
 
-`destino-arqlab/10` usa `openshift-default` + Route `passthrough` — el patrón de
-`poc-egress-kuadrant/destino-ocp/`, ya probado en campo. Evita el bloqueo, no necesita MetalLB,
-y **es el experimento de control que el propio runbook lista como pendiente**: si acá el cert sí
-llega por SDS, queda probado que el problema es el despliegue manual del DaemonSet → caso de
-soporte acotado con Red Hat. Si tampoco llega, es un hallazgo de plataforma más amplio.
-En los dos casos cerramos una incógnita sin trabajo extra.
+Detalle completo de la reversión en `destino-arqlab/11-DESCARTADO-gateway-propio.md`, incluido
+el único caso en que convendría reabrirla.
 
-## 3. CNAMEs — lo que hay que pedir
+Del lado destino queda **una sola pieza de red**: la HTTPRoute `backend-lab`. Convive con la
+`backend` que ya atiende a EKS sobre el mismo gateway porque los hostnames son distintos:
 
-**No reusar `app2.paas-demo.bancogalicia.com.ar`**: ese CNAME apunta al NLB de EKS y lo usa
-arqlab como origen. Si paas-lab lo reusa, no está probando arqlab — está yendo a EKS con otro
-nombre, y es un falso positivo silencioso (el preflight de camino lo detecta, C1).
+```
+paas-lab (ns poc-egress-kuadrant)   →  Host: backend.poc-egress-kuadrant.svc.cluster.local
+EKS      (ns poc-ingress-kuadrant)  →  Host: backend.poc-ingress-kuadrant.svc.cluster.local
+```
 
-| FQDN | Apunta a | Estado |
-|---|---|---|
-| `bff.paas-demo.bancogalicia.com.ar` | `gw-hostnet` de arqlab | existe |
-| `app2.paas-demo.bancogalicia.com.ar` | NLB de EKS | existe |
-| **`app3.paas-demo.bancogalicia.com.ar`** | **VIP del router de arqlab** | **a pedir** |
+El gateway de egreso no reescribe el Host: lo que llega es el FQDN interno del origen.
 
-Mientras no exista, se destraba con `resolution: STATIC` en el ServiceEntry apuntando a la VIP
-(el preflight de camino la descubre e imprime). El wildcard `*.paas-demo` ya cubre el cert.
+## 3. Nombres y certificado
+
+`app3.paas-demo.bancogalicia.com.ar` ya apunta on-prem (verificado 2026-09-09):
+
+```
+app3.paas-demo  →CNAME→  shard1.paas-demo  →A→  10.254.124.36
+PTR de 10.254.124.36: *.apps.paas-arqlab.bancogalicia.com.ar  y  shard1.paas-demo...
+```
+
+`app3` se usa como **nombre lógico** del camino y como audiencia del token. El **SNI** puede ser
+otro: lo decide qué nombres cubre el certificado del listener. `origen-paas-lab/04` arranca con
+el recuadro que hay que resolver primero:
+
+```bash
+oc --context=paas-arqlab -n connlink-ingress get secret shard1-paas-demo \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d \
+  | openssl x509 -noout -subject -ext subjectAltName -dates
+```
+
+Si el SAN trae el wildcard `*.paas-demo…`, poné `sni: app3.paas-demo…` y queda todo uniforme.
+Si trae solo `shard1.paas-demo…`, dejá el `sni: shard1…` que viene por defecto. Que `host` y
+`sni` difieran es válido y deliberado: uno es el nombre lógico, el otro la identidad TLS.
+
+Ese mismo certificado es el sospechoso principal del ingreso al `bff` de arqlab —
+ver `destino-arqlab/12-ingress-bff-arqlab.md`.
+
+**No reusar `app2.paas-demo…`**: apunta al NLB de EKS. Usarlo sería ir a EKS con otro nombre,
+un falso positivo silencioso. El preflight de camino lo detecta (C1).
 
 ## 4. Orden de aplicación
 
@@ -59,13 +84,11 @@ Mientras no exista, se destraba con `resolution: STATIC` en el ServiceEntry apun
 oc --context=paas-lab apply -f origen-paas-lab/01-authorino-cache-size.yaml
 oc --context=paas-lab -n kuadrant-system rollout status deployment authorino
 oc --context=paas-lab apply -f origen-paas-lab/03-serviceentry-destino.yaml
-oc --context=paas-lab apply -f origen-paas-lab/04-destinationrule-tls.yaml
+oc --context=paas-lab apply -f origen-paas-lab/04-destinationrule-tls.yaml   # ver el recuadro
 oc --context=paas-lab apply -f origen-paas-lab/02-authpolicy-origen.yaml
 
 # ── DESTINO arqlab ────────────────────────────────────────────────────────────
-oc --context=paas-arqlab apply -f destino-arqlab/10-gateway-ingress.yaml
-oc --context=paas-arqlab apply -f destino-arqlab/11-route-passthrough.yaml
-oc --context=paas-arqlab apply -f destino-arqlab/12-httproute-backend.yaml
+oc --context=paas-arqlab apply -f destino-arqlab/10-httproute-backend.yaml
 oc --context=paas-arqlab apply -f destino-arqlab/13-authpolicy-vault-spiffe.yaml
 
 # ── verificar ANTES del corte ─────────────────────────────────────────────────
@@ -80,24 +103,23 @@ Revertir el corte es volver el selector a `{"app":"backend"}`. Instantáneo, sin
 
 ## 5. Conmutar de destino — tres cosas juntas, no una
 
-Es la trampa principal de este montaje. Cambiar el `backendRef` del HTTPRoute **no alcanza**:
+La trampa principal. Cambiar el `backendRef` del HTTPRoute **no alcanza**:
 
 | Qué | Dónde | Si no lo movés |
 |---|---|---|
-| `backendRef` | `HTTPRoute egress-backend` | el tráfico sigue yendo al destino viejo |
+| `backendRef` | `HTTPRoute egress-backend` del origen | el tráfico sigue yendo al destino viejo |
 | `audience` del mint | `AuthPolicy` de origen, `body.expression` | el destino nuevo rechaza por `aud` |
 | `cache.key` | `AuthPolicy` de origen, `metadata.cache` | Authorino sirve hasta **250 s** el token de la audiencia vieja |
 
 El tercero es el que engaña: el 403 aparece con retraso y parece un problema de red.
-Conmutar y probar dentro de los 250 s siguientes da resultados inconsistentes.
 
 ## 6. Antes de creerle a un 200
 
-`destino-arqlab/14-diagnostico-claims.md`. Está **confirmado en vivo** que el bloque
-`claims-esperados` del destino OCP no estaba rechazando (pasó un `sub` impostor). La hipótesis
-principal es poda silenciosa del campo `predicate` por deriva de schema del CRD — hay evidencia
-indirecta: el CRD de paas-lab tampoco tiene `credentials.customHeader.prefix`, que los
-manifiestos venían usando.
+`destino-arqlab/14-diagnostico-claims.md`. Está confirmado en vivo que el bloque
+`claims-esperados` del destino OCP no rechazaba (pasó un `sub` impostor). Al 2026-09-09 hay dos
+hipótesis **refutadas con evidencia** (poda de schema del CRD; istiod que no empuja el
+`ext_authz`) y un árbol de decisión que arranca en un único dato todavía sin obtener:
+**¿Authorino llegó a ver el request?**
 
-El preflight de camino (C5) lo chequea directamente: cuenta cuántos `predicate` sobrevivieron
-al `apply`. Si el CRD los podó, ese es el hallazgo cerrado.
+Mientras eso no esté cerrado, un 200 no prueba que la autorización funcione — solo que el
+tráfico llega.

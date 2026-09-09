@@ -473,7 +473,37 @@ un listener por hostname.
 openssl x509 -in <cert>.crt -noout -subject -ext subjectAltName -dates
 ```
 
-### 7.2 El bloqueo: el certificado no llega por SDS
+### 7.2 El bloqueo: el certificado no llega por SDS — **RESUELTO (2026-09-09)**
+
+> **ESTE BLOQUEO YA NO EXISTE.** Estado verificado del Gateway el 2026-09-09:
+>
+> ```
+> listener https:443   Accepted=True  Programmed=True  ResolvedRefs=True  attachedRoutes=3
+> certificateRefs:     Secret/shard1-paas-demo, mode Terminate
+> Gateway Programmed:  "assigned to service(s) …:443 and …:80"   (transición 2026-09-03)
+> ```
+>
+> `ResolvedRefs=True` en el listener significa que el `certificateRefs` resolvió: Envoy tiene el
+> certificado. No quedó registrado cuál de los pendientes de más abajo lo destrabó — si alguien
+> lo sabe, vale anotarlo acá.
+>
+> **Consecuencias, para no arrastrar decisiones viejas:**
+> - El 443 de `gw-hostnet` es utilizable. Los diseños que lo esquivaban ya no se justifican:
+>   `poc-onprem-kuadrant/` descartó por esto su Gateway `openshift-default` + Route passthrough
+>   (ver `poc-onprem-kuadrant/destino-arqlab/11-DESCARTADO-gateway-propio.md`).
+> - El **experimento de control** que se lista abajo (punto 2 de "Pendiente de probar") perdió
+>   su motivo original. Y la sospecha de que este mismo mecanismo explicara el hallazgo de
+>   claims que no rechazan quedó **refutada por separado**: el Envoy de `gw-hostnet` SÍ tiene los
+>   filtros de Kuadrant (63 `authorino`, 7 `ext_authz`, 149 `kuadrant` en su `config_dump`).
+>   Ver `poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`.
+> - Lo que **sigue vigente** de esta sección es §7.1, y en particular la advertencia sobre los
+>   SAN del certificado: `shard1-paas-demo` puede ser de un solo nombre, y entonces no cubre
+>   `bff-arqlab.paas-demo…` ni `app3.paas-demo…`. Es el sospechoso principal del ingreso al
+>   `bff` — ver `poc-onprem-kuadrant/destino-arqlab/12-ingress-bff-arqlab.md`.
+>
+> Lo que sigue se conserva como registro de lo que se descartó mientras estuvo abierto.
+
+
 
 Envoy pide el secret pero nunca lo recibe:
 
