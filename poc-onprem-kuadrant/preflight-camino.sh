@@ -22,11 +22,13 @@ DST_IP="${DST_IP:-}"                                      # vacío => se descubr
 NS="${NS:-poc-egress-kuadrant}"                           # ns en el origen
 NS_DST="${NS_DST:-poc-ingress-kuadrant}"                  # ns en el destino
 HOST_INTERNO="${HOST_INTERNO:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
-CERT_SECRET="${CERT_SECRET:-paas-demo-wildcard-tls}"
-GW="${GW:-ingress-gw-lab}"
+# Rediseño 2026-09-09: se reusa gw-hostnet (su 443 funciona), no hay Gateway propio ni Route.
+NS_GW="${NS_GW:-connlink-ingress}"
+GW="${GW:-gw-hostnet}"
 LISTENER="${LISTENER:-https}"
+CERT_SECRET="${CERT_SECRET:-shard1-paas-demo}"
+SNI_CERT="${SNI_CERT:-shard1.paas-demo.bancogalicia.com.ar}"  # el nombre que el cert SÍ cubre
 ROUTE="${ROUTE:-backend-lab}"
-OCPROUTE="${OCPROUTE:-app3-lab-passthrough}"
 POLICY="${POLICY:-backend-lab-vault-spiffe}"
 POLICY_ORI="${POLICY_ORI:-egress-backend-vault-spiffe}"
 SUB_ESPERADO="${SUB_ESPERADO:-spiffe://poc-egress.bancogalicia.com.ar/paas-lab/egress-gw}"
@@ -78,8 +80,8 @@ resolver() {
 
 # Sonda TCP+TLS+HTTP+skew desde un pod del origen, todo en una pasada.
 sonda() {
-  local ip="$1"
-  oco -n "$NS" exec -i deploy/bff -- python3 - "$ip" "$FQDN" "$HOST_INTERNO" <<'PY' 2>/dev/null || echo '{"error":"no se pudo ejecutar en deploy/bff"}'
+  local ip="$1"; local sni="${2:-$FQDN}"
+  oco -n "$NS" exec -i deploy/bff -- python3 - "$ip" "$sni" "$HOST_INTERNO" <<'PY' 2>/dev/null || echo '{"error":"no se pudo ejecutar en deploy/bff"}'
 import http.client, json, re, socket, ssl, sys, time
 from email.utils import parsedate_to_datetime
 ip, fqdn, hosthdr = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -193,11 +195,22 @@ if [[ -z "$TARGET" ]]; then
 else
   nota "sondeando $TARGET:443 con SNI=$FQDN desde deploy/bff en el origen"
   S=$(sonda "$TARGET"); ERR=$(j "$S" '.error')
-  if [[ "$ERR" != "null" ]]; then
-    bad "TCP 443 hacia $TARGET" "$ERR" "conexión establecida"
-    nota "si falla acá es un pedido a redes y bloquea la prueba entera. Los chequeos del"
-    nota "destino siguen corriendo igual: son independientes."
-  else
+  case "$ERR" in
+    tcp:*)
+      bad "TCP 443 hacia $TARGET" "$ERR" "conexión establecida"
+      nota "NO abrió el socket: esto sí es camino L3/firewall, y es un pedido a redes."
+      ;;
+    tls:*)
+      bad "handshake TLS hacia $TARGET" "$ERR" "handshake completo"
+      nota "OJO: el TCP SÍ conectó — el camino de red EXISTE. Falla el TLS."
+      nota "Un reset en el handshake es el síntoma que describe el runbook §7.1: sin filter"
+      nota "chain que matchee el SNI, Envoy resetea (errno=104). Ver la matriz de C2bis:"
+      nota "compara VIP vs nodo y SNI logico vs SNI del certificado para aislar cuál de los dos."
+      ;;
+    null) ;;
+    *) bad "sonda hacia $TARGET" "$ERR" "sin error" ;;
+  esac
+  if [[ "$ERR" == "null" ]]; then
     ok "TCP 443 hacia $TARGET" "$(j "$S" '.tcp_ms') ms"
     ok "handshake TLS" "$(j "$S" '.tls_ms') ms"
     nota "este RTT se le suma a CADA request y no se ve en pruebas locales"
@@ -209,8 +222,8 @@ else
       skip "certificado que presenta el destino" "no se pudo leer"
     else
       bad "el SNI eligió el Gateway del destino" "$CERT" "un cert con paas-demo"
-      nota "presenta el cert DEFAULT del router: el SNI no matcheó ninguna Route passthrough."
-      nota "Normal ANTES de aplicar 11-route-passthrough.yaml; después, es un fallo."
+      nota "no presenta un cert de paas-demo: el SNI no matcheó el filter chain esperado."
+      nota "Contrastar con la matriz de C2bis y con el SAN real del cert (C3)."
     fi
 
     ST=$(j "$S" '.http')
@@ -220,7 +233,7 @@ else
            nota "EL DESTINO CONTESTA SIN EXIGIR TOKEN. Es exactamente el hallazgo abierto."
            nota "Antes de seguir, leer destino-arqlab/14-diagnostico-claims.md." ;;
       503) skip "GET sin token" "503 del router — Route sin endpoints o Gateway sin montar" ;;
-      404) skip "GET sin token" "404 — el Host no matchea ningún HTTPRoute (revisar 12)" ;;
+      404) skip "GET sin token" "404 — el Host no matchea ningún HTTPRoute (revisar 10-httproute-backend.yaml)" ;;
       *)   skip "GET sin token" "status=$ST" ;;
     esac
 
@@ -235,6 +248,39 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+esc "C2bis — Matriz de aislamiento del TLS" \
+    "dos variables, cuatro combinaciones: ¿es el F5 o es el SNI?"
+
+# El FQDN resuelve a una VIP del F5 (otra subred que los nodos). gw-hostnet es hostNetwork:
+# escucha en la IP de los NODOS. Si el handshake anda contra el nodo pero no contra la VIP,
+# el problema es la config del F5 y no Envoy. Y si anda con el SNI del certificado pero no
+# con el logico, es matching de SNI en Envoy — que ademas responde qué poner en el
+# DestinationRule (origen-paas-lab/04).
+NODO=$(ocd get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+printf '  %-26s %-42s %s\n' "DESTINO" "SNI" "RESULTADO"
+for tgt_lbl in "VIP:$TARGET" "NODO:${NODO:-}"; do
+  tgt_ip="${tgt_lbl#*:}"; [[ -z "$tgt_ip" ]] && continue
+  for sni in "$FQDN" "$SNI_CERT"; do
+    S2=$(sonda "$tgt_ip" "$sni"); E2=$(j "$S2" '.error')
+    if [[ "$E2" == "null" ]]; then
+      # armado en pasos a proposito: meter jq con comillas dobles dentro de una cadena
+      # entre comillas dobles rompe el parseo del shell.
+      T2=$(j "$S2" '.tls_ms'); H2=$(j "$S2" '.http')
+      C2=$(printf '%s' "$S2" | jq -r '.cert // [] | join(",")' 2>/dev/null)
+      RES="tls_ok ${T2}ms  http=${H2}  cert=${C2}"
+    else
+      RES="$E2"
+    fi
+    printf '  %-26s %-42s %s\n' "${tgt_lbl%%:*} $tgt_ip" "$sni" "$RES"
+  done
+done
+nota "Lectura:"
+nota "  NODO ok + VIP falla            -> el F5/VIP no está publicando el 443 de gw-hostnet"
+nota "  SNI del cert ok + logico falla -> matching de SNI en Envoy; usar ese SNI en 04, o"
+nota "                                    reemitir el cert con el nombre logico en los SAN"
+nota "  los cuatro fallan              -> mirar el listener https del Gateway (C5) y el cert"
+
+# ─────────────────────────────────────────────────────────────────────────────
 esc "C3 — Plataforma en arqlab" "que exista lo que los manifiestos 10-13 dan por sentado"
 
 GC=$(ocd get gatewayclass openshift-default -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null)
@@ -245,15 +291,35 @@ ECS=$(ocd -n kuadrant-system get authorino -o jsonpath='{.items[0].spec.evaluato
 [[ "${ECS:-0}" -ge 10 ]] 2>/dev/null && ok "evaluatorCacheSize en el destino" "$ECS" \
                                      || skip "evaluatorCacheSize en el destino" "${ECS:-unset} (solo importa si arqlab también mintea)"
 
-if ocd -n "$NS_DST" get secret "$CERT_SECRET" >/dev/null 2>&1; then
-  T=$(ocd -n "$NS_DST" get secret "$CERT_SECRET" -o jsonpath='{.type}')
-  eq "Secret del wildcard es kubernetes.io/tls" "$T" "kubernetes.io/tls"
-  N=$(ocd -n "$NS_DST" get secret "$CERT_SECRET" -o jsonpath='{.data.tls\.crt}' | base64 -d 2>/dev/null | grep -c 'BEGIN CERTIFICATE')
+# El certificado del listener vive en el ns del GATEWAY (connlink-ingress), no en el de la PoC.
+if ocd -n "$NS_GW" get secret "$CERT_SECRET" >/dev/null 2>&1; then
+  T=$(ocd -n "$NS_GW" get secret "$CERT_SECRET" -o jsonpath='{.type}')
+  eq "Secret $CERT_SECRET es kubernetes.io/tls" "$T" "kubernetes.io/tls"
+  CRT=$(ocd -n "$NS_GW" get secret "$CERT_SECRET" -o jsonpath='{.data.tls\.crt}' | base64 -d 2>/dev/null)
+  N=$(printf '%s' "$CRT" | grep -c 'BEGIN CERTIFICATE')
   if (( N > 1 )); then ok "tls.crt trae la cadena" "$N certificados"
   else bad "tls.crt trae la cadena" "$N certificado" ">1 (hoja + intermedias)"
-       nota "con solo la hoja el origen no arma la cadena y el handshake falla con un 503 mudo"; fi
+       nota "con solo la hoja el origen no arma la cadena y el handshake falla sin decir por qué"; fi
+  # LO QUE DECIDE EL SNI: qué nombres cubre realmente.
+  if command -v openssl >/dev/null; then
+    SAN=$(printf '%s' "$CRT" | openssl x509 -noout -ext subjectAltName 2>/dev/null | tr -d ' ' | tail -1)
+    SUBJ=$(printf '%s' "$CRT" | openssl x509 -noout -subject 2>/dev/null)
+    nota "subject: ${SUBJ:-?}"
+    nota "SAN    : ${SAN:-<sin SAN>}"
+    if [[ "$SAN" == *"*.paas-demo"* ]]; then
+      ok "el cert cubre el wildcard *.paas-demo" "usar sni: $FQDN en origen-paas-lab/04"
+    elif [[ "$SAN" == *"${FQDN%%.*}."* ]]; then
+      ok "el cert cubre $FQDN" "usar sni: $FQDN"
+    else
+      bad "el cert cubre $FQDN" "${SAN:-sin SAN}" "un SAN que incluya $FQDN"
+      nota "por eso el handshake con SNI=$FQDN puede resetear. Opciones: usar sni: $SNI_CERT"
+      nota "en origen-paas-lab/04, o reemitir el cert agregando $FQDN a los SAN."
+    fi
+  else
+    skip "SAN del certificado" "no hay openssl en el bastión — correr el comando a mano"
+  fi
 else
-  skip "Secret $CERT_SECRET en $NS_DST" "todavía no creado — lo necesita 10-gateway-ingress.yaml"
+  skip "Secret $CERT_SECRET en $NS_GW" "no encontrado"
 fi
 
 CH=$(ocd auth can-i create routes/custom-host -n "$NS_DST" 2>/dev/null)
@@ -282,59 +348,67 @@ else bad "evaluatorCacheSize en paas-lab" "${ECSO:-unset}" ">=10"
 esc "C5 — Encadenamiento del montaje en arqlab" \
     "que las piezas no solo existan, sino que estén ENGANCHADAS entre sí"
 
-if ! ocd -n "$NS_DST" get gateway "$GW" >/dev/null 2>&1; then
-  skip "todo el escenario C5" "el Gateway $GW todavía no existe — normal antes del montaje"
+# Rediseño 2026-09-09: el destino reusa gw-hostnet (ns connlink-ingress). No hay Gateway propio
+# ni Route de OpenShift. Antes esta sección buscaba `ingress-gw-lab` y salteaba TODO en silencio.
+if ! ocd -n "$NS_GW" get gateway "$GW" >/dev/null 2>&1; then
+  bad "Gateway $GW en $NS_GW" "no existe" "presente"
 else
-  PROG=$(ocd -n "$NS_DST" get gateway "$GW" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
-  eq "Gateway Programmed" "${PROG:-null}" "True"
-  if [[ "${PROG:-}" != "True" ]]; then
-    nota "condiciones del listener $LISTENER:"
-    nota "  $(ocd -n "$NS_DST" get gateway "$GW" -o jsonpath="{range .status.listeners[?(@.name=='$LISTENER')]}{range .conditions[*]}{.type}={.status}({.reason}) {end}{end}" 2>/dev/null)"
-    nota "un InvalidCertificateRef acá es la causa raíz de todo lo que falle más arriba."
-    nota "Si además el Envoy deja el secret en 'warming', es el MISMO bloqueo de SDS del"
-    nota "runbook §7.2 — y entonces ya tenés la respuesta al experimento de control."
-  fi
-  ATT=$(ocd -n "$NS_DST" get gateway "$GW" -o jsonpath="{.status.listeners[?(@.name=='$LISTENER')].attachedRoutes}" 2>/dev/null)
-  if [[ "${ATT:-0}" =~ ^[0-9]+$ ]] && (( ATT > 0 )); then ok "routes attacheadas al listener" "$ATT"
-  else bad "routes attacheadas al listener" "${ATT:-0}" ">0"; fi
-
-  if ocd -n "$NS_DST" get httproute "$ROUTE" >/dev/null 2>&1; then
-    ACC=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[?(@.type=="Accepted")]}{.status}{end}{end}' 2>/dev/null)
-    [[ "$ACC" == *True* ]] && ok "HTTPRoute adoptado por el Gateway" "Accepted=True" \
-      || { bad "HTTPRoute adoptado por el Gateway" "${ACC:-sin condición}" "True"
-           nota "solo condiciones kuadrant.io/* => el problema está en el Gateway, no en la policy"; }
-  else skip "HTTPRoute $ROUTE" "todavía no aplicado"; fi
-
-  if ocd -n "$NS_DST" get authpolicy "$POLICY" >/dev/null 2>&1; then
-    A2=$(ocd -n "$NS_DST" get authpolicy "$POLICY" -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
-    eq "AuthPolicy Accepted/Enforced" "${A2:-null}" "True/True"
-    # EL CHEQUEO QUE IMPORTA: ¿sobrevivieron los predicate al apply, o los podó el CRD?
-    PR=$(ocd -n "$NS_DST" get authpolicy "$POLICY" -o json 2>/dev/null \
-          | jq -r '[.spec.rules.authorization[]?.patternMatching.patterns[]?.predicate] | map(select(.!=null)) | length' 2>/dev/null)
-    if [[ "${PR:-0}" -gt 0 ]] 2>/dev/null; then
-      ok "los predicate sobrevivieron al apply" "$PR patrones"
-      ocd -n "$NS_DST" get authpolicy "$POLICY" -o json 2>/dev/null \
-        | jq -r '.spec.rules.authorization[]?.patternMatching.patterns[]?.predicate' 2>/dev/null | sed 's/^/        /'
-      printf '%s' "$(ocd -n "$NS_DST" get authpolicy "$POLICY" -o json | jq -r '..|.predicate? // empty')" \
-        | grep -q "$SUB_ESPERADO" && ok "el sub de paas-lab está en los claims-esperados" "$SUB_ESPERADO" \
-        || bad "el sub de paas-lab está en los claims-esperados" "ausente" "$SUB_ESPERADO"
-    else
-      bad "los predicate sobrevivieron al apply" "0 patrones con predicate" ">0"
-      nota "EL API SERVER LOS PODÓ: el CRD instalado no declara ese campo. La policy queda"
-      nota "Accepted+Enforced y NO EVALÚA NADA. Es la hipótesis principal del hallazgo —"
-      nota "ver destino-arqlab/14-diagnostico-claims.md. Confirmar con:"
-      nota "  oc --context=$CTX_DST explain authpolicy.spec.rules.authorization.patternMatching.patterns --recursive"
-    fi
-  else skip "AuthPolicy $POLICY" "todavía no aplicada"; fi
-
-  if ocd -n "$NS_DST" get route "$OCPROUTE" >/dev/null 2>&1; then
-    AD=$(ocd -n "$NS_DST" get route "$OCPROUTE" -o jsonpath='{.status.ingress[0].conditions[?(@.type=="Admitted")].status}' 2>/dev/null)
-    eq "Route de passthrough admitida" "${AD:-null}" "True"
-    TERM=$(ocd -n "$NS_DST" get route "$OCPROUTE" -o jsonpath='{.spec.tls.termination}' 2>/dev/null)
-    eq "terminación de la Route" "${TERM:-null}" "passthrough"
-    [[ "${TERM:-}" != "passthrough" ]] && nota "con edge/reencrypt el router rutea por Host y da 503 en el 100% del tráfico"
-  else skip "Route $OCPROUTE" "todavía no aplicada"; fi
+  PROG=$(ocd -n "$NS_GW" get gateway "$GW" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
+  eq "Gateway $GW Programmed" "${PROG:-null}" "True"
+  LC=$(ocd -n "$NS_GW" get gateway "$GW" -o jsonpath="{range .status.listeners[?(@.name=='$LISTENER')]}{range .conditions[*]}{.type}={.status} {end}{end}" 2>/dev/null)
+  nota "listener $LISTENER: ${LC:-sin datos}"
+  case "$LC" in
+    *"ResolvedRefs=True"*) ok "el listener $LISTENER resolvió su certificado" "ResolvedRefs=True" ;;
+    "") skip "condiciones del listener $LISTENER" "no encontrado" ;;
+    *) bad "el listener $LISTENER resolvió su certificado" "$LC" "ResolvedRefs=True"
+       nota "un InvalidCertificateRef acá es la causa raíz de todo lo que falle más arriba" ;;
+  esac
+  ATT=$(ocd -n "$NS_GW" get gateway "$GW" -o jsonpath="{.status.listeners[?(@.name=='$LISTENER')].attachedRoutes}" 2>/dev/null)
+  if [[ "${ATT:-0}" =~ ^[0-9]+$ ]] && (( ATT > 0 )); then ok "routes attacheadas al listener $LISTENER" "$ATT"
+  else bad "routes attacheadas al listener $LISTENER" "${ATT:-0}" ">0"; fi
 fi
+
+if ocd -n "$NS_DST" get httproute "$ROUTE" >/dev/null 2>&1; then
+  ACC=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[?(@.type=="Accepted")]}{.status}{end}{end}' 2>/dev/null)
+  RR=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{range .status.parents[*]}{range .conditions[?(@.type=="ResolvedRefs")]}{.status}{end}{end}' 2>/dev/null)
+  [[ "$ACC" == *True* ]] && ok "HTTPRoute $ROUTE adoptada por el Gateway" "Accepted=True" \
+    || { bad "HTTPRoute $ROUTE adoptada por el Gateway" "${ACC:-sin condición}" "True"
+         nota "solo condiciones kuadrant.io/* => el problema está en el Gateway, no en la policy"; }
+  [[ "$RR" == *True* ]] && ok "backendRef de $ROUTE resuelve" "ResolvedRefs=True" \
+    || bad "backendRef de $ROUTE resuelve" "${RR:-null}" "True"
+  HN=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{.spec.hostnames[*]}' 2>/dev/null)
+  nota "hostname que matchea: $HN"
+  nota "el origen manda ese FQDN CON ':8080' (el egreso no reescribe el Host). Gateway API"
+  nota "matchea sin puerto, pero es la hipótesis abierta de la rama A de 14-diagnostico-claims.md."
+else
+  bad "HTTPRoute $ROUTE en $NS_DST" "ausente" "presente"
+fi
+
+if ocd -n "$NS_DST" get authpolicy "$POLICY" >/dev/null 2>&1; then
+  A2=$(ocd -n "$NS_DST" get authpolicy "$POLICY" -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}' 2>/dev/null)
+  eq "AuthPolicy $POLICY Accepted/Enforced" "${A2:-null}" "True/True"
+  [[ "${A2:-}" != "True/True" ]] && nota "motivo: $(ocd -n "$NS_DST" get authpolicy "$POLICY" -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}' 2>/dev/null)"
+  PR=$(ocd -n "$NS_DST" get authpolicy "$POLICY" -o json 2>/dev/null \
+        | jq -r '[.spec.rules.authorization[]?.patternMatching.patterns[]?.predicate] | map(select(.!=null)) | length' 2>/dev/null)
+  if [[ "${PR:-0}" -gt 0 ]] 2>/dev/null; then
+    ok "los predicate sobrevivieron al apply" "$PR patrones"
+    ocd -n "$NS_DST" get authpolicy "$POLICY" -o json 2>/dev/null \
+      | jq -r '.spec.rules.authorization[]?.patternMatching.patterns[]?.predicate' 2>/dev/null \
+      | sed 's/^/        /'
+    ocd -n "$NS_DST" get authpolicy "$POLICY" -o json 2>/dev/null | grep -q "$SUB_ESPERADO" \
+      && ok "el sub de paas-lab está en los claims-esperados" "$SUB_ESPERADO" \
+      || bad "el sub de paas-lab está en los claims-esperados" "ausente" "$SUB_ESPERADO"
+  else
+    bad "los predicate sobrevivieron al apply" "0 con predicate" ">0"
+  fi
+else
+  bad "AuthPolicy $POLICY en $NS_DST" "ausente" "presente"
+fi
+
+# Todas las AuthPolicy que compiten por el mismo gateway: si dos apuntan al mismo targetRef,
+# Kuadrant marca una como overridden y podés estar mirando el status de la que NO se aplica.
+nota "AuthPolicy en $NS_DST (revisar overridden):"
+ocd -n "$NS_DST" get authpolicy -o custom-columns='NOMBRE:.metadata.name,TARGET:.spec.targetRef.name,ACC:.status.conditions[?(@.type=="Accepted")].status,ENF:.status.conditions[?(@.type=="Enforced")].status' --no-headers 2>/dev/null | sed 's/^/        /'
 
 # ─────────────────────────────────────────────────────────────────────────────
 printf '\n%s══ Resumen ══%s\n' "$B" "$Z"
