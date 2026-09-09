@@ -1,23 +1,9 @@
-# ORIGEN paas-lab — TLS origination hacia el gw-hostnet de arqlab.
+# ORIGEN paas-lab — TLS origination hacia el ingress-gw-lab de arqlab (router default).
 #
-# ┌─ LO PRIMERO, ANTES DE APLICAR: QUÉ NOMBRES CUBRE EL CERTIFICADO ─────────────────────────┐
-# │ El listener https de gw-hostnet termina TLS con el Secret `shard1-paas-demo`. Ese Secret │
-# │ se creó (runbook §7.1) desde shard1.paas-demo.bancogalicia.com.ar.crt — o sea que puede  │
-# │ ser un cert de UN SOLO NOMBRE, no un wildcard. Si es así y anunciás sni: app3.paas-demo…, │
-# │ el origen recibe un cert que no cubre ese nombre y el handshake falla.                    │
-# │                                                                                           │
-# │   oc --context=paas-arqlab -n connlink-ingress get secret shard1-paas-demo \              │
-# │     -o jsonpath='{.data.tls\.crt}' | base64 -d \                                          │
-# │     | openssl x509 -noout -subject -ext subjectAltName -dates                             │
-# │                                                                                           │
-# │   SAN incluye *.paas-demo…  → poné sni: app3.paas-demo.bancogalicia.com.ar (uniforme)     │
-# │   SAN es solo shard1…       → dejá el sni de abajo como está                              │
-# │ El runbook §7.1 ya advierte esta trampa: un wildcard NO cubre el dominio en sí, y sin     │
-# │ filter chain que matchee el SNI Envoy resetea con un error que no señala a la causa.      │
-# └───────────────────────────────────────────────────────────────────────────────────────────┘
-#
-# Que host y sni difieran es deliberado y no rompe nada: app3 es el nombre LÓGICO del camino
-# (y resuelve por CNAME a shard1, la misma IP), shard1 es la IDENTIDAD TLS que el cert acredita.
+# HAProxy en passthrough elige backend por SNI. La Route `app3-lab-passthrough` declara
+# host=app3…, así que el SNI TIENE que ser app3. Medido 2026-09-09 contra 10.254.28.1:
+# SNI=app3 completa el handshake y el Gateway presenta CN=shard1.paas-demo (multi-SAN).
+# sni=shard1 no matchea esa Route; host≠sni acá NO es inocuo.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
@@ -47,8 +33,7 @@ spec:
           number: 443
         tls:
           mode: SIMPLE
-          # Ver el recuadro de arriba. Este valor asume cert de un solo nombre (shard1).
-          sni: shard1.paas-demo.bancogalicia.com.ar
+          sni: app3.paas-demo.bancogalicia.com.ar
           # CA interna del banco — el Envoy de arqlab termina TLS con un cert de esa jerarquía,
           # así que sirve el MISMO Secret destino-ca de
           # poc-egress-kuadrant/origen/04-destinationrule-tls.yaml, verbatim.

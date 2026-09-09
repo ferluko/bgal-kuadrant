@@ -20,8 +20,9 @@
 # aplicaría también al local y se perdería el split por peso, que es la herramienta central de la
 # migración progresiva.
 #
-# El DNS ya está: app3.paas-demo -CNAME-> shard1.paas-demo -A-> 10.254.124.36, cuyo PTR es
-# *.apps.paas-arqlab -> es la VIP del router default, que es justo quien admite esta Route.
+# VIP del router default (HostNetwork): 10.254.28.1 (la de *.apps.paas-arqlab).
+# app3/shard1 DNS hoy apuntan a 10.254.124.36 (F5 de gw-hostnet) — ESA NO es esta Route.
+# El origen fuerza 10.254.28.1 en el ServiceEntry hasta que Infoblox corrija app3.
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:

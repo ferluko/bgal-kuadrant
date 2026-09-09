@@ -1,12 +1,12 @@
 # ORIGEN paas-lab — el ingreso de arqlab como servicio externo a la malla.
 #
-# app3.paas-demo.bancogalicia.com.ar ya apunta on-prem (verificado 2026-09-09):
-#   app3.paas-demo → CNAME shard1.paas-demo → 10.254.124.36
-#   PTR de esa IP: *.apps.paas-arqlab.bancogalicia.com.ar  y  shard1.paas-demo...
+# Medido 2026-09-09 desde el bastión:
+#   app3 / shard1.paas-demo  →  10.254.124.36   F5 de shard1/gw-hostnet. TLS RST (errno=104)
+#   *.apps.paas-arqlab       →  10.254.28.1     VIP del IngressController default (HostNetwork)
 #
-# Se usa app3 como NOMBRE LÓGICO de este camino (paas-lab → arqlab) aunque por SNI se anuncie
-# otro nombre. Ver 04-destinationrule-tls.yaml: el SNI lo decide el certificado del listener,
-# no el nombre lógico. Istio soporta perfectamente sni != host.
+# La Route passthrough vive en el router default. El CNAME app3→shard1 manda al F5 equivocado.
+# Hasta que Infoblox apunte app3 a 10.254.28.1, resolution STATIC. Cuando el A/CNAME esté
+# bien, volver a `resolution: DNS` y sacar `addresses`.
 #
 # VERIFICAR ANTES DE APLICAR: paas-lab ya tiene un ServiceEntry `backend-destino` heredado de
 # arqlab, casi seguro apuntando a app2 (que resuelve al NLB de EKS). Mirar qué host tiene:
@@ -23,7 +23,9 @@ spec:
   hosts:
     - "app3.paas-demo.bancogalicia.com.ar"
   location: MESH_EXTERNAL
-  resolution: DNS
+  resolution: STATIC
+  addresses:
+    - "10.254.28.1"
   ports:
     - number: 443
       name: http-for-tls-origination
