@@ -1,0 +1,66 @@
+# ORIGEN paas-lab — timeout del ext_authz SOLO en egress-gw.
+#
+# El 200 ms default de Envoy (Kuadrant no lo expone en AuthPolicy) es más bajo que el
+# mint en frío a HCP Vault. Medido 2026-09-09:
+#   mint tibio (reuso TLS)  ~160 ms     entra en 200 ms → el cache escribe
+#   mint frío (handshake)   ~485 ms     NO entra → Envoy cancela → Authorino no
+#                                       escribe cache → el próximo request TAMBIÉN
+#                                       es miss. Esa es la trampa.
+#   camino cacheado         ~16 ms p50  el timeout NO se paga en el happy path
+#
+# Subir a 5s o fail-open SÍ es contraproducente: Vault caído deja colgado cada
+# request, o el egreso firma sin mint. 750 ms cubre el p99 del frío (preflight:
+# 485 ms) con margen, sigue fail-closed, y sólo aplica a ESTE gateway.
+#
+# Esto no saca a Vault del camino. El arreglo sano es el CronJob+httpd de
+# poc-egress-kuadrant/origen/vault/PROPUESTA-fix-latencia-mint-ocp.md (y de paso
+# tapa el 403 horario de 16-token-rotacion-authorino.md). Hasta entonces, este
+# filtro deja que el miss de cache termine y escriba.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: ext-authz-timeout-egress
+  namespace: poc-egress-kuadrant
+spec:
+  workloadSelector:
+    labels:
+      gateway.networking.k8s.io/gateway-name: egress-gw
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.ext_authz
+      patch:
+        operation: MERGE
+        value:
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+            grpc_service:
+              timeout: 0.75s
+---
+# Aplicar:
+#   oc --context=paas-lab apply -f origen-paas-lab/17-timeout-ext-authz.yaml
+#
+# Verificar que quedó en el proxy (Kuadrant puede reescribirlo en el reconcile):
+#   oc --context=paas-lab -n poc-egress-kuadrant exec deploy/egress-gw-openshift-default \
+#     -c istio-proxy -- pilot-agent request GET config_dump \
+#     | python3 -c '
+#   import json,sys
+#   d=json.load(sys.stdin)
+#   for c in d.get("configs",[]):
+#     hcm=c.get("dynamic_listeners") or c.get("static_listeners") or []
+#   print("buscar timeout en ext_authz; tiene que decir 0.750s, no 0.200s")
+#   '
+#   oc --context=paas-lab -n poc-egress-kuadrant exec deploy/egress-gw-openshift-default \
+#     -c istio-proxy -- pilot-agent request GET config_dump \
+#     | grep -A2 '"timeout"' | head
+#
+# Si el grep sigue mostrando 0.200s, el operator pisó el MERGE: parar y no insistir
+# con un timeout más alto — pasar al mint fuera de línea.
+#
+# NO tocar: failure_mode_allow. Tiene que seguir en deny.
