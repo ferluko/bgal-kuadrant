@@ -1,0 +1,39 @@
+# ORIGEN paas-lab — BLOQUEANTE #1. Aplicar ESTE PRIMERO, antes que nada.
+#
+# Medido en paas-lab el 2026-09-09: el mint a HCP Vault tarda 483-486 ms, las cinco muestras.
+# No es jitter, es un piso duro de RTT desde on-prem. El ext_authz de Kuadrant corta a 200 ms
+# FIJOS. Sin cache, cada request dispara un mint que no llega a tiempo.
+#
+# Y el cache no funciona con el default: evaluatorCacheSize NO está seteado en paas-lab -> 1 MB,
+# con tope POR ENTRADA de 1/1024 (~1024 bytes). El JWT crudo mide 840 bytes, pero lo que
+# Authorino cachea es la RESPUESTA ENTERA de Vault (envelope + token) — en arqlab eso midió
+# exactamente 1042 bytes, y cada escritura al cache falló EN SILENCIO (solo visible con
+# LogLevel: debug). Esperar el mismo número acá.
+#
+# Es a nivel CLUSTER, no de esta PoC: afecta a toda AuthPolicy que use `cache` en metadata.http.
+# El chart de kuadrant-operator no lo expone por values.yaml, así que este CR aparte es la
+# única vía declarativa.
+apiVersion: operator.authorino.kuadrant.io/v1beta1
+kind: Authorino
+metadata:
+  name: authorino
+  namespace: kuadrant-system
+spec:
+  clusterWide: true
+  evaluatorCacheSize: 10
+  listener:
+    tls:
+      enabled: false
+  oidcServer:
+    tls:
+      enabled: false
+  supersedingHostSubsets: true
+---
+# Verificación:
+#   oc --context=<paas-lab> get authorino authorino -n kuadrant-system \
+#     -o jsonpath='{.spec.evaluatorCacheSize}{"\n"}'
+#   oc --context=<paas-lab> rollout status deployment authorino -n kuadrant-system
+#
+# Cómo saber si el cache funciona DE VERDAD (no alcanza con que el YAML esté aplicado):
+# dos requests seguidos tienen que traer el MISMO `iat` en el token. Si el iat cambia,
+# está minteando fresco y el cache sigue sin escribir.

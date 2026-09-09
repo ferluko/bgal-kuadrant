@@ -1,0 +1,84 @@
+# ORIGEN paas-lab — BLOQUEANTE #2: hoy NO EXISTE ninguna AuthPolicy en este cluster.
+# Confirmado por el preflight (2026-09-09): Gateway, HTTPRoute, ServiceEntry y DestinationRule
+# están todos armados y correctos, pero nada inyecta el token. Sin esto el destino rechaza —
+# o, dado el hallazgo abierto de claims, lo deja pasar y parece que funcionó.
+#
+# Adaptado de poc-egress-kuadrant/origen/vault/03-authpolicy-origen-ocp.yaml (arqlab).
+# Lo que cambia respecto de arqlab, y por qué:
+#
+#   1. role de mint: egress-gw-paas-lab  (arqlab usa egress-gw-ocp)
+#      -> el `sub` sale distinto y el destino puede distinguir quién le habla.
+#         Confirmado en vivo: spiffe://poc-egress.bancogalicia.com.ar/paas-lab/egress-gw
+#   2. sharedSecretRef: vault-egress-token-ocp
+#      -> OJO: el CronJob de paas-lab se llama vault-egress-login-ocp y deja el token en
+#         vault-egress-token-ocp — nombres copiados de arqlab sin renombrar. Funciona (son
+#         clusters distintos) pero miente. Si renombrás a -paas-lab, cambiar ACÁ también.
+#   3. cache.key: "egress-gw-paas-lab"
+#      -> TIENE que ser distinto por (cluster, audiencia). Es la trampa del switcheo de
+#         destino: si cambiás el backendRef del HTTPRoute pero dejás la misma cache.key,
+#         Authorino sirve hasta 250 s el token de la audiencia VIEJA y el 403 resultante
+#         parece un problema de red.
+#   4. audience: app3.paas-demo.bancogalicia.com.ar
+#      -> el FQDN del ingress de arqlab para ESTA PoC. NO reusar app2: ese CNAME ya apunta
+#         al NLB de EKS (lo usa arqlab como origen). Ver README §CNAMEs.
+#
+# SIN prefijo "Bearer " a propósito: confirmado en vivo en ambas direcciones que Authorino
+# no lo saca al parsear, y con el prefijo falla el 100% de los requests.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: egress-backend-vault-spiffe
+  namespace: poc-egress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: egress-backend
+  rules:
+    authentication:
+      "workload-interno":
+        anonymous: {}
+
+    metadata:
+      "vault_mint":
+        http:
+          url: "https://vault-cluster-noprod-private-vault-16d614b5.bc6ede80.z1.hashicorp.cloud:8200/v1/spiffe/role/egress-gw-paas-lab/mintjwt"
+          method: POST
+          headers:
+            "X-Vault-Namespace":
+              value: "admin/spiffe"
+          sharedSecretRef:
+            name: vault-egress-token-ocp
+            key: client_token
+          credentials:
+            customHeader:
+              name: "X-Vault-Token"
+          body:
+            expression: '"{\"audience\": \"app3.paas-demo.bancogalicia.com.ar\"}"'
+        # REQUIERE 01-authorino-cache-size.yaml aplicado. Sin eso esto no cachea nada y,
+        # con 485 ms de mint contra 200 ms de ext_authz, falla casi siempre.
+        cache:
+          key:
+            expression: '"egress-gw-paas-lab"'
+          ttl: 250
+        priority: 0
+
+    authorization:
+      "vault_mint_check":
+        patternMatching:
+          patterns:
+            - predicate: "has(auth.metadata.vault_mint.data.token)"
+
+    response:
+      success:
+        headers:
+          "x-egress-token":
+            plain:
+              expression: 'auth.metadata.vault_mint.data.token'
+---
+# Verificación:
+#   oc --context=<paas-lab> -n poc-egress-kuadrant get authpolicy egress-backend-vault-spiffe \
+#     -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}/{.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+#
+# Accepted/Enforced True/True NO garantiza que el mint funcione: si el cache no escribe,
+# igual queda Enforced y falla en runtime. Verificar con tráfico real y con `iat` repetido.

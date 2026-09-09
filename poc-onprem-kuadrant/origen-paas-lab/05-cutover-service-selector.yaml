@@ -1,0 +1,37 @@
+# ORIGEN paas-lab — ETAPA B, EL CORTE. Aplicar ÚLTIMO, cuando todo lo demás verifica.
+#
+# El preflight confirmó que hoy el Service backend apunta a los pods locales
+# (selector {"app":"backend"}): estás pre-cutover, sin riesgo.
+#
+# Esto NO recrea el Service: le cambia el selector para que sus endpoints pasen a ser los
+# pods del gateway de egreso. Misma ClusterIP, mismo nombre, mismo puerto. El bff no se
+# entera: sigue consumiendo http://backend.poc-egress-kuadrant.svc.cluster.local:8080.
+#
+# REVERTIR es volver el selector a {"app":"backend"} — instantáneo, sin recrear nada:
+#   oc --context=<paas-lab> -n poc-egress-kuadrant patch svc backend --type=merge \
+#     -p '{"spec":{"selector":{"app":"backend"}}}'
+#
+# CONFIRMAR el label real del gateway ANTES de aplicar (el nombre del Deployment que vio el
+# preflight es egress-gw-openshift-default):
+#   oc --context=<paas-lab> -n poc-egress-kuadrant get pods \
+#     -l gateway.networking.k8s.io/gateway-name=egress-gw --show-labels
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: poc-egress-kuadrant
+spec:
+  selector:
+    gateway.networking.k8s.io/gateway-name: egress-gw
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Aplicar con merge para no pisar la ClusterIP:
+#   oc --context=<paas-lab> -n poc-egress-kuadrant patch svc backend --type=merge \
+#     -p '{"spec":{"selector":{"gateway.networking.k8s.io/gateway-name":"egress-gw"}}}'
+#
+# Verificar que los endpoints cambiaron a los pods del gateway:
+#   oc --context=<paas-lab> -n poc-egress-kuadrant get endpoints backend -o wide

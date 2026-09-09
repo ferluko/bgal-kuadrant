@@ -1,0 +1,54 @@
+# ORIGEN paas-lab — TLS origination hacia arqlab. La app manda HTTP plano, el gateway
+# abre TLS. El `sni` es lo que hace que esto funcione SIN reescribir el Host: el request
+# viaja con Host: backend.poc-egress-kuadrant.svc.cluster.local y abre TLS anunciando
+# app3.paas-demo..., que es por lo que el router de arqlab elige la Route passthrough.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: backend-destino-arqlab-tls
+  namespace: poc-egress-kuadrant
+spec:
+  host: app3.paas-demo.bancogalicia.com.ar
+  trafficPolicy:
+    # NO ES OPCIONAL. Medido en arqlab (2026-08-06): sin este bloque, con RTT real y
+    # concurrencia, Envoy abre y cierra conexiones sin parar -> 503 con response_flags URX,UF
+    # y p99 en ~3 RTT. Con el pool: cero errores, p50 en el piso del RTT.
+    # No se descubre contra un destino local: con RTT cero abrir conexión es gratis.
+    connectionPool:
+      tcp:
+        maxConnections: 64
+        connectTimeout: 5s
+      http:
+        # CAMBIO RESPECTO DE arqlab->EKS: los 300 s de allá estaban calibrados contra el
+        # idle timeout FIJO de 350 s del NLB de AWS. Acá el que corta es el router HAProxy
+        # de arqlab (`timeout tunnel`, default 1 h en OCP, ajustable por la anotación
+        # haproxy.router.openshift.io/timeout). 300 s sigue siendo conservador y seguro,
+        # pero el número ya no está atado a AWS — VERIFICAR el timeout real de ese router
+        # antes de asumir que hace falta reciclar tan seguido.
+        idleTimeout: 300s
+        maxRequestsPerConnection: 0
+        h2UpgradePolicy: UPGRADE
+    portLevelSettings:
+      - port:
+          number: 443
+        tls:
+          mode: SIMPLE
+          sni: app3.paas-demo.bancogalicia.com.ar
+          # CA interna del banco. El Envoy de arqlab termina TLS con el wildcard
+          # *.paas-demo.bancogalicia.com.ar, así que la cadena que hay que validar es la
+          # misma que ya se usa contra EKS -> el Secret destino-ca de
+          # poc-egress-kuadrant/origen/04-destinationrule-tls.yaml sirve VERBATIM.
+          #
+          # PENDIENTE HEREDADO, no repetir el trabajo: el root correcto tiene que tener
+          # SKI 9B:E7:80:85:7F:57:2F:38:49:B1:BE:7C:9D:93:39:14:D0:B2:BC:7E
+          # (CN=Root CA Banco Galicia). Verificar por AKI/SKI con openssl, NO por nombre —
+          # ya pasó que un cert con nombre plausible no cerraba criptográficamente.
+          credentialName: destino-ca
+          # Solo para destrabar la primera prueba: comentar credentialName y descomentar
+          # la línea siguiente. NO dejarlo así: sin validación de cadena el TLS protege de
+          # escucha pasiva pero no de un MITM.
+          # insecureSkipVerify: true
+---
+# El Secret destino-ca va en el NAMESPACE DONDE CORREN LOS PODS DEL GATEWAY, que no siempre
+# es el de la PoC:
+#   oc --context=<paas-lab> get pods -A -l gateway.networking.k8s.io/gateway-name=egress-gw
