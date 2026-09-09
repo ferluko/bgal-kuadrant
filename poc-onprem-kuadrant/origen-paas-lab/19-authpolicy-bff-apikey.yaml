@@ -1,14 +1,14 @@
-# ORIGEN paas-lab — exige api_key + client_key en el ingreso del BFF.
+# ORIGEN paas-lab — AuthPolicy del BFF, calcada de echoserver-auth (arqlab,
+# Enforced=True, sin EnvoyFilter).
 #
-# NO toca el mint JWT del egreso (02-authpolicy-origen.yaml, target HTTPRoute
-# egress-backend). Esta policy apunta a HTTPRoute bff-lab (00).
+#   header app_key  -> Secret.stringData.api_key  (evaluador apiKey)
+#   header app_id   -> lo manda el consumidor; Kuadrant NO lo lee. El vínculo
+#                      es la label application_id del Secret.
 #
-# Dos evaluadores apiKey serían OR: con uno solo válido autenticás. El par se
-# arma así: lookup de `api_key` contra el Secret (campo fijo `api_key`) y
-# autorización CEL sobre `client_key` del MISMO Secret.
+# allNamespaces: true como en echoserver-auth. Respuesta JSON en `body`, no
+# `message` (ese campo deja text/plain y el cliente no parsea).
 #
-# SIN `credentials.customHeader.prefix`: el CRD de paas-lab no lo declara y se
-# poda en silencio (14-diagnostico-claims.md).
+# NO toca el mint JWT del egreso (02, HTTPRoute egress-backend).
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
 metadata:
@@ -21,57 +21,56 @@ spec:
     name: bff-lab
   rules:
     authentication:
-      "consumer-apikey":
+      api-key-authn-bff-lab:
         apiKey:
+          allNamespaces: true
           selector:
             matchLabels:
-              authorino.kuadrant.io/managed-by: authorino
-              poc.galicia.io/consumer: bff-lab
+              application_id: bff-lab
+              key-type: app-key
         credentials:
           customHeader:
-            name: api_key
-
-    authorization:
-      "client-key":
-        patternMatching:
-          patterns:
-            - predicate: |
-                (has(auth.identity.data) && request.http.headers["client_key"] == auth.identity.data.client_key)
-                || (has(auth.identity.metadata.annotations) && request.http.headers["client_key"] == auth.identity.metadata.annotations["poc.galicia.io/client-key"])
-
+            name: app_key
     response:
       unauthenticated:
-        message:
-          value: "falta api_key o no coincide con un consumidor habilitado"
+        body:
+          value: |-
+            {
+              "error": "AuthenticationRequired",
+              "message": "Authentication parameters missing"
+            }
+        headers:
+          content-type:
+            value: application/json
       unauthorized:
-        message:
-          value: "client_key no corresponde al consumidor de api_key"
+        body:
+          value: |-
+            {
+              "error": "InvalidToken",
+              "message": "Authentication failed"
+            }
+        headers:
+          content-type:
+            value: application/json
 ---
-# Aplicar (18 primero):
 #   oc --context=paas-lab apply -f origen-paas-lab/18-secret-consumer-bff.yaml
 #   oc --context=paas-lab apply -f origen-paas-lab/19-authpolicy-bff-apikey.yaml
-#
-# PRIMER COMANDO DESPUÉS DE APLICAR — detecta poda silenciosa del CRD:
-#   oc --context=paas-lab -n poc-egress-kuadrant get authpolicy bff-lab-apikey \
-#     -o jsonpath='{.spec.rules.authorization.client-key.patternMatching.patterns}{"\n"}'
-# Si vuelve VACÍO o sin `predicate`, el API server podó el campo: Accepted+Enforced
-# y no evalúa el client_key.
 #
 #   oc --context=paas-lab -n poc-egress-kuadrant get authpolicy bff-lab-apikey \
 #     -o jsonpath='Accepted={.status.conditions[?(@.type=="Accepted")].status} Enforced={.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
 #
-# Prueba (valores de 18):
-#   curl -sS -D- http://bff-lab.paas-demo.bancogalicia.com.ar/ | head
-#     -> 401 falta api_key
-#   curl -sS -H 'api_key: lab-api-key-not-for-prod' http://bff-lab.paas-demo.bancogalicia.com.ar/
-#     -> 403 client_key no corresponde
-#   curl -sS -H 'api_key: lab-api-key-not-for-prod' -H 'client_key: no' \
-#     http://bff-lab.paas-demo.bancogalicia.com.ar/
-#     -> 403
-#   curl -sS -H 'api_key: lab-api-key-not-for-prod' -H 'client_key: lab-client-key-not-for-prod' \
-#     http://bff-lab.paas-demo.bancogalicia.com.ar/
-#     -> 200 del BFF
+# Consumo (mismo shape que echoserver-b2c):
 #
-# Si con el par correcto igual da 401: (1) Enforced=False (gateway), (2) Envoy
-# tiró los headers con underscore (EnvoyFilter de 00), (3) el Secret no tiene
-# la label managed-by=authorino.
+#   curl -sS -D- http://bff-lab.paas-demo.bancogalicia.com.ar/
+#     -> 401  {"error":"AuthenticationRequired",...}
+#
+#   curl -sS -D- -H 'app_id: bff-lab' -H 'app_key: lab-app-key-not-for-prod' \
+#     http://bff-lab.paas-demo.bancogalicia.com.ar/
+#     -> 200 JSON del BFF
+#
+#   curl -sS -D- -H 'app_id: bff-lab' -H 'app_key: no' \
+#     http://bff-lab.paas-demo.bancogalicia.com.ar/
+#     -> 401/403  {"error":"InvalidToken",...}
+#
+# Si `spec.rules.response.unauthenticated.body` queda vacío tras el apply, el
+# CRD de paas-lab no declara `body` (dialecto): avisar, no inventar EnvoyFilter.

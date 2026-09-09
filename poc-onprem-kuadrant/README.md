@@ -74,8 +74,12 @@ oc --context=paas-lab apply -f origen-paas-lab/03-serviceentry-destino.yaml
 oc --context=paas-lab apply -f origen-paas-lab/04-destinationrule-tls.yaml   # ver el recuadro
 oc --context=paas-lab apply -f origen-paas-lab/02-authpolicy-origen.yaml
 oc --context=paas-lab apply -f origen-paas-lab/00-httproute-bff-lab.yaml
+oc --context=paas-lab -n poc-egress-kuadrant delete envoyfilter bff-gw-lab-allow-underscores --ignore-not-found
 oc --context=paas-lab apply -f origen-paas-lab/18-secret-consumer-bff.yaml
 oc --context=paas-lab apply -f origen-paas-lab/19-authpolicy-bff-apikey.yaml
+# ingreso BFF: mismo contrato que echoserver-auth (header app_key, sin EnvoyFilter)
+#   curl -sS -D- -H 'app_id: bff-lab' -H 'app_key: lab-app-key-not-for-prod' \
+#     http://bff-lab.paas-demo.bancogalicia.com.ar/
 
 # ── DESTINO arqlab ────────────────────────────────────────────────────────────
 # el cert: copiar shard1-paas-demo (su SAN cubre app3) al ns de la PoC — ver 10-gateway-ingress

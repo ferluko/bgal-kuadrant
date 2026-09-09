@@ -29,8 +29,8 @@
 # Si el FQDN no resuelve desde el bastión:
 #   URL=http://<vip-paas-lab> HOST=bff-lab.paas-demo.bancogalicia.com.ar ./medir-latencia.sh
 #
-# Con la AuthPolicy de ingreso (19-authpolicy-bff-apikey.yaml) hay que mandar el par:
-#   API_KEY=lab-api-key-not-for-prod CLIENT_KEY=lab-client-key-not-for-prod ./medir-latencia.sh
+# Con la AuthPolicy de ingreso (19, contrato echoserver-auth):
+#   APP_ID=bff-lab APP_KEY=lab-app-key-not-for-prod ./medir-latencia.sh
 set -uo pipefail
 
 N="${1:-100}"
@@ -38,31 +38,31 @@ MODO="${2:-}"
 PAR="${3:-1}"
 URL="${URL:-http://bff-lab.paas-demo.bancogalicia.com.ar}"
 HOST="${HOST:-bff-lab.paas-demo.bancogalicia.com.ar}"
-API_KEY="${API_KEY:-}"
-CLIENT_KEY="${CLIENT_KEY:-}"
+APP_ID="${APP_ID:-}"
+APP_KEY="${APP_KEY:-}"
 
 command -v jq >/dev/null || { echo "falta jq"; exit 2; }
 
-python3 - "$N" "$MODO" "$URL" "$HOST" "$PAR" "$API_KEY" "$CLIENT_KEY" <<'PY'
+python3 - "$N" "$MODO" "$URL" "$HOST" "$PAR" "$APP_ID" "$APP_KEY" <<'PY'
 import json, subprocess, sys, collections, time
 from concurrent.futures import ThreadPoolExecutor
 
 n, modo, url, host = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 par = max(1, int(sys.argv[5])) if modo == "--par" else 1
 ab = (modo == "--ab")
-api_key = sys.argv[6] if len(sys.argv) > 6 else ""
-client_key = sys.argv[7] if len(sys.argv) > 7 else ""
+app_id = sys.argv[6] if len(sys.argv) > 6 else ""
+app_key = sys.argv[7] if len(sys.argv) > 7 else ""
 
 def pedir(i):
     canary = ab and (i % 2 == 1)
-    cmd = ["curl", "-s", "--max-time", "20", "-H", "Host: " + host]
-    if api_key:
-        cmd += ["-H", "api_key: " + api_key]
-    if client_key:
-        cmd += ["-H", "client_key: " + client_key]
+    cmd = ["curl", "-sS", "--max-time", "20", "-H", "Host: " + host]
+    if app_id:
+        cmd += ["-H", "app_id: " + app_id]
+    if app_key:
+        cmd += ["-H", "app_key: " + app_key]
     if canary:
         cmd += ["-H", "x-canary: true"]
-    cmd += [url + "/"]
+    cmd += ["-w", "\n__HTTP__%{http_code}", url + "/"]
     return ("con x-canary" if canary else "por defecto",
             subprocess.run(cmd, capture_output=True, text=True).stdout)
 
@@ -78,32 +78,39 @@ datos = collections.defaultdict(list)
 por_variante = collections.defaultdict(collections.Counter)
 errores = collections.Counter()
 for variante, salida in crudo:
+    cuerpo, _, codigo = salida.rpartition("\n__HTTP__")
+    codigo = (codigo or "").strip()
     try:
-        u = (json.loads(salida) or {}).get("upstream") or {}
+        j = json.loads(cuerpo) or {}
+        if j.get("error") and "upstream" not in j:
+            errores["%s: http=%s auth=%s %s" % (variante, codigo, j.get("error"), j.get("message", ""))] += 1
+            continue
+        u = j.get("upstream") or {}
         if u.get("status") != 200:
             body = u.get("body")
             if isinstance(body, str):
                 detalle = body[:80].replace("\n", " ")
             else:
                 detalle = (u.get("error") or "")[:40]
-            errores["%s: status=%s %s" % (variante, u.get("status"), detalle)] += 1
+            errores["%s: http=%s upstream=%s %s" % (variante, codigo, u.get("status"), detalle)] += 1
             continue
         pod = ((u.get("body") or {}).get("environment") or {}).get("HOSTNAME", "(sin HOSTNAME)")
         datos[pod].append(u["latencyMs"])
         por_variante[variante][pod] += 1
     except Exception as e:
-        errores["%s: %s" % (variante, type(e).__name__)] += 1
+        snippet = (cuerpo or salida).strip().replace("\n", " ")[:120]
+        errores["%s: http=%s %s body=%r" % (variante, codigo or "?", type(e).__name__, snippet)] += 1
 
 pct = lambda v, q: v[min(len(v) - 1, int(len(v) * q))]
 
 print("\nmodo: %s   requests: %d   duracion: %.1fs" %
       ("EN SERIE" if par == 1 else "PARALELO x%d" % par, n, wall))
 print("bff: %s  Host: %s" % (url, host))
-if api_key or client_key:
-    print("ingreso: api_key=%s  client_key=%s" %
-          ("set" if api_key else "VACIO", "set" if client_key else "VACIO"))
+if app_id or app_key:
+    print("ingreso: app_id=%s  app_key=%s" %
+          (app_id or "VACIO", "set" if app_key else "VACIO"))
 else:
-    print("ingreso: sin api_key/client_key (la AuthPolicy bff-lab-apikey va a devolver 401)")
+    print("ingreso: sin app_id/app_key (la AuthPolicy bff-lab-apikey va a devolver 401)")
 if par > 1:
     print("throughput: %.1f req/s   (los percentiles incluyen tiempo en cola: NO comparar con la corrida en serie)"
           % (n / wall if wall else 0))
