@@ -45,9 +45,30 @@ ocd()  { oc ${CTX_DST:+--context="$CTX_DST"} "$@"; }
 j()    { printf '%s' "${1:-}" | jq -r "${2} // \"null\"" 2>/dev/null || echo null; }
 
 for b in oc jq; do command -v $b >/dev/null || { echo "falta '$b' en el PATH"; exit 2; }; done
-[[ -n "$CTX_DST" && "$CTX_ORI" == "$CTX_DST" ]] && { echo "CTX_ORI y CTX_DST son el mismo contexto"; exit 2; }
 printf '%sPoC on-prem — preflight del camino paas-lab -> paas-arqlab%s\n' "$B" "$Z"
-nota "origen: ${CTX_ORI:-<actual>}   destino: ${CTX_DST:-<actual>}   FQDN: $FQDN"
+
+# Los dos contextos son OBLIGATORIOS. Si se dejan vacíos, oco() y ocd() corren los dos
+# contra el contexto actual y el preflight mide un solo cluster creyendo que mide dos:
+# los chequeos del destino salen "PASS" con datos del origen. Autodetectar y verificar
+# que los API server sean REALMENTE distintos.
+ALL_CTX=$(oc config get-contexts -o name 2>/dev/null)
+pick() { printf '%s\n' "$ALL_CTX" | grep -i -- "$1" | grep -vi -- "${2:-@@nada@@}" | head -1; }
+[[ -z "$CTX_ORI" ]] && CTX_ORI=$(pick 'paas-lab')
+[[ -z "$CTX_DST" ]] && CTX_DST=$(pick 'arqlab')
+[[ -z "$CTX_ORI" ]] && { echo "no encontré contexto de origen: pasá CTX_ORI=<nombre>"; exit 2; }
+[[ -z "$CTX_DST" ]] && { echo "no encontré contexto de destino: pasá CTX_DST=<nombre>"; exit 2; }
+SRV_O=$(oco whoami --show-server 2>/dev/null)
+SRV_D=$(ocd whoami --show-server 2>/dev/null)
+[[ -z "$SRV_O" ]] && { echo "el contexto de origen '$CTX_ORI' no responde"; exit 2; }
+[[ -z "$SRV_D" ]] && { echo "el contexto de destino '$CTX_DST' no responde"; exit 2; }
+if [[ "$SRV_O" == "$SRV_D" ]]; then
+  echo "ORIGEN Y DESTINO APUNTAN AL MISMO API SERVER ($SRV_O)."
+  echo "Los chequeos del destino serían del origen disfrazados. Corregí los contextos."
+  exit 2
+fi
+nota "origen : $CTX_ORI  -> $SRV_O"
+nota "destino: $CTX_DST  -> $SRV_D"
+nota "FQDN de la prueba: $FQDN"
 
 # Resolución DNS desde un pod del ORIGEN (es la que importa: la del bastión puede diferir).
 resolver() {
@@ -108,6 +129,18 @@ else
   ok "CNAME de $FQDN resuelve" "$RES_NEW"
 fi
 
+# Que resuelva NO significa que resuelva al destino correcto. Un FQDN ya tomado apuntando
+# a otro lado es el peor caso: parece configurado y manda el tráfico a un cluster ajeno.
+if [[ "$RES_NEW" != "no-resuelve" ]]; then
+  PREF_NEW="${RES_NEW%.*.*}"; PREF_EKS="${RES_EKS%.*.*}"
+  if [[ "$RES_EKS" != "no-resuelve" && "$PREF_NEW" == "$PREF_EKS" ]]; then
+    bad "$FQDN apunta a on-prem" "$RES_NEW (misma /16 que el destino EKS: $PREF_EKS.x.x)" "un rango on-prem"
+    nota "ESE NOMBRE YA ESTÁ TOMADO Y APUNTA A LA NUBE. No lo reutilices ni lo repuntes sin"
+    nota "averiguar quién lo usa: elegí un FQDN libre y creá el registro on-prem apuntando"
+    nota "a la VIP de ingress del destino (la que descubre el bloque de abajo)."
+  fi
+fi
+
 if [[ "$RES_NEW" != "no-resuelve" && "$RES_NEW" == "$RES_EKS" ]]; then
   bad "los dos FQDN apuntan a IPs distintas" "ambos a $RES_NEW" "IPs distintas"
   nota "si $FQDN resuelve al MISMO destino que $FQDN_EKS, no estás probando arqlab: estás"
@@ -118,11 +151,34 @@ fi
 VIP=$(ocd -n openshift-ingress get svc router-default \
         -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 [[ -z "$VIP" ]] && VIP=$(ocd -n openshift-ingress get svc router-default \
-        -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
 DOM=$(ocd get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null)
-nota "router de arqlab: VIP=${VIP:-no-determinada}   dominio de apps=${DOM:-?}"
-[[ -n "$VIP" ]] && ok "VIP del router del destino descubierta" "$VIP" \
-                || skip "VIP del router del destino" "sin permisos sobre openshift-ingress"
+# El dominio de apps es la forma más barata de detectar que ocd está pegándole al cluster
+# equivocado: tiene que decir arqlab, no lab.
+nota "dominio de apps del destino: ${DOM:-?}"
+case "${DOM:-}" in
+  *arqlab*) ok "el contexto de destino ES arqlab" "$DOM" ;;
+  "")       skip "dominio de apps del destino" "sin permisos sobre ingresses.config" ;;
+  *)        bad "el contexto de destino ES arqlab" "$DOM" "apps.paas-arqlab..." ;;
+esac
+# Fallback: si el router no expone VIP, sirven las IPs de los nodos (el ingress hostNetwork
+# y el router escuchan ahí).
+if [[ -z "$VIP" ]]; then
+  VIP=$(ocd get nodes -l node-role.kubernetes.io/infra= \
+          -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+  [[ -z "$VIP" ]] && VIP=$(ocd get nodes \
+          -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+  [[ -n "$VIP" ]] && nota "router sin VIP publicada; uso IP de nodo del destino como referencia"
+fi
+if [[ -n "$VIP" ]]; then
+  ok "IP de referencia del destino" "$VIP"
+  nota "es a ESTA red a la que tiene que apuntar el registro DNS que crees on-prem"
+  if [[ "$RES_NEW" != "no-resuelve" && "${RES_NEW%.*.*}" != "${VIP%.*.*}" ]]; then
+    bad "$FQDN apunta a la red del destino" "$RES_NEW" "algo en ${VIP%.*.*}.x.x"
+  fi
+else
+  skip "IP de referencia del destino" "sin permisos para leerla"
+fi
 
 TARGET="${DST_IP:-}"
 [[ -z "$TARGET" && "$RES_NEW" != "no-resuelve" ]] && TARGET="$RES_NEW"
