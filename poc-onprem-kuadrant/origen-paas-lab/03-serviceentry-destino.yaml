@@ -1,12 +1,10 @@
 # ORIGEN paas-lab — el ingreso de arqlab como servicio externo a la malla.
 #
-# Medido 2026-09-09 desde el bastión:
-#   app3 / shard1.paas-demo  →  10.254.124.36   F5 de shard1/gw-hostnet. TLS RST (errno=104)
-#   *.apps.paas-arqlab       →  10.254.28.1     VIP del IngressController default (HostNetwork)
-#
-# La Route passthrough vive en el router default. El CNAME app3→shard1 manda al F5 equivocado.
-# Hasta que Infoblox apunte app3 a 10.254.28.1, resolution STATIC. Cuando el A/CNAME esté
-# bien, volver a `resolution: DNS` y sacar `addresses`.
+# DNS (Infoblox). Medido 2026-09-09: son DOS VIPs distintas.
+#   shard1.paas-demo         →  10.254.124.36   F5 de gw-hostnet. TLS RST. NO tocar.
+#   *.apps.paas-arqlab       →  10.254.28.1     IngressController default (HostNetwork).
+# app3 tiene que resolver a 10.254.28.1 (A, o CNAME al mismo target que *.apps).
+# NO CNAME a shard1: la Route passthrough vive en el router default, no en ese F5.
 #
 # VERIFICAR ANTES DE APLICAR: paas-lab ya tiene un ServiceEntry `backend-destino` heredado de
 # arqlab, casi seguro apuntando a app2 (que resuelve al NLB de EKS). Mirar qué host tiene:
@@ -23,9 +21,7 @@ spec:
   hosts:
     - "app3.paas-demo.bancogalicia.com.ar"
   location: MESH_EXTERNAL
-  resolution: STATIC
-  addresses:
-    - "10.254.28.1"
+  resolution: DNS
   ports:
     - number: 443
       name: http-for-tls-origination

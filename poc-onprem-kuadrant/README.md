@@ -43,29 +43,23 @@ Esta decisión dio tres vueltas en un día. Están las tres, con lo que invalid�
 
 ## 3. Nombres y certificado
 
-`app3.paas-demo.bancogalicia.com.ar` ya apunta on-prem (verificado 2026-09-09):
+`app3.paas-demo.bancogalicia.com.ar` es el nombre del camino y la audiencia del token.
+DNS y SNI tienen que coincidir con el router default, no con `shard1`:
 
 ```
-app3.paas-demo  →CNAME→  shard1.paas-demo  →A→  10.254.124.36
-PTR de 10.254.124.36: *.apps.paas-arqlab.bancogalicia.com.ar  y  shard1.paas-demo...
+*.apps.paas-arqlab          →  10.254.28.1     IngressController default (HostNetwork)
+app3.paas-demo              →  10.254.28.1     A (o CNAME al mismo target que *.apps)
+shard1.paas-demo            →  10.254.124.36   F5 de gw-hostnet. TLS RST. NO usar.
 ```
 
-`app3` se usa como **nombre lógico** del camino y como audiencia del token. El **SNI** puede ser
-otro: lo decide qué nombres cubre el certificado del listener. `origen-paas-lab/04` arranca con
-el recuadro que hay que resolver primero:
-
-```bash
-oc --context=paas-arqlab -n connlink-ingress get secret shard1-paas-demo \
-  -o jsonpath='{.data.tls\.crt}' | base64 -d \
-  | openssl x509 -noout -subject -ext subjectAltName -dates
-```
-
-Si el SAN trae el wildcard `*.paas-demo…`, poné `sni: app3.paas-demo…` y queda todo uniforme.
-Si trae solo `shard1.paas-demo…`, dejá el `sni: shard1…` que viene por defecto. Que `host` y
-`sni` difieran es válido y deliberado: uno es el nombre lógico, el otro la identidad TLS.
+Medido 2026-09-09: el CNAME `app3 → shard1` mandaba el TLS al F5 de `gw-hostnet` y el
+handshake reseteaba (`errno=104`). La Route passthrough está en el router default; contra
+`10.254.28.1` + SNI=`app3` el Gateway presenta `CN=shard1.paas-demo` (multi-SAN) y el
+handshake completa. El DestinationRule lleva `sni: app3…` porque HAProxy passthrough elige
+backend por SNI = host de la Route.
 
 Ese mismo certificado es el sospechoso principal del ingreso al `bff` de arqlab —
-ver `destino-arqlab/12-ingress-bff-arqlab.md`.
+ver `destino-arqlab/15-ingress-bff-arqlab.md`.
 
 **No reusar `app2.paas-demo…`**: apunta al NLB de EKS. Usarlo sería ir a EKS con otro nombre,
 un falso positivo silencioso. El preflight de camino lo detecta (C1).
