@@ -1,0 +1,77 @@
+# ORIGEN paas-lab — exige api_key + client_key en el ingreso del BFF.
+#
+# NO toca el mint JWT del egreso (02-authpolicy-origen.yaml, target HTTPRoute
+# egress-backend). Esta policy apunta a HTTPRoute bff-lab (00).
+#
+# Dos evaluadores apiKey serían OR: con uno solo válido autenticás. El par se
+# arma así: lookup de `api_key` contra el Secret (campo fijo `api_key`) y
+# autorización CEL sobre `client_key` del MISMO Secret.
+#
+# SIN `credentials.customHeader.prefix`: el CRD de paas-lab no lo declara y se
+# poda en silencio (14-diagnostico-claims.md).
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: bff-lab-apikey
+  namespace: poc-egress-kuadrant
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: bff-lab
+  rules:
+    authentication:
+      "consumer-apikey":
+        apiKey:
+          selector:
+            matchLabels:
+              authorino.kuadrant.io/managed-by: authorino
+              poc.galicia.io/consumer: bff-lab
+        credentials:
+          customHeader:
+            name: api_key
+
+    authorization:
+      "client-key":
+        patternMatching:
+          patterns:
+            - predicate: |
+                (has(auth.identity.data) && request.http.headers["client_key"] == auth.identity.data.client_key)
+                || (has(auth.identity.metadata.annotations) && request.http.headers["client_key"] == auth.identity.metadata.annotations["poc.galicia.io/client-key"])
+
+    response:
+      unauthenticated:
+        message:
+          value: "falta api_key o no coincide con un consumidor habilitado"
+      unauthorized:
+        message:
+          value: "client_key no corresponde al consumidor de api_key"
+---
+# Aplicar (18 primero):
+#   oc --context=paas-lab apply -f origen-paas-lab/18-secret-consumer-bff.yaml
+#   oc --context=paas-lab apply -f origen-paas-lab/19-authpolicy-bff-apikey.yaml
+#
+# PRIMER COMANDO DESPUÉS DE APLICAR — detecta poda silenciosa del CRD:
+#   oc --context=paas-lab -n poc-egress-kuadrant get authpolicy bff-lab-apikey \
+#     -o jsonpath='{.spec.rules.authorization.client-key.patternMatching.patterns}{"\n"}'
+# Si vuelve VACÍO o sin `predicate`, el API server podó el campo: Accepted+Enforced
+# y no evalúa el client_key.
+#
+#   oc --context=paas-lab -n poc-egress-kuadrant get authpolicy bff-lab-apikey \
+#     -o jsonpath='Accepted={.status.conditions[?(@.type=="Accepted")].status} Enforced={.status.conditions[?(@.type=="Enforced")].status}{"\n"}'
+#
+# Prueba (valores de 18):
+#   curl -sS -D- http://bff-lab.paas-demo.bancogalicia.com.ar/ | head
+#     -> 401 falta api_key
+#   curl -sS -H 'api_key: lab-api-key-not-for-prod' http://bff-lab.paas-demo.bancogalicia.com.ar/
+#     -> 403 client_key no corresponde
+#   curl -sS -H 'api_key: lab-api-key-not-for-prod' -H 'client_key: no' \
+#     http://bff-lab.paas-demo.bancogalicia.com.ar/
+#     -> 403
+#   curl -sS -H 'api_key: lab-api-key-not-for-prod' -H 'client_key: lab-client-key-not-for-prod' \
+#     http://bff-lab.paas-demo.bancogalicia.com.ar/
+#     -> 200 del BFF
+#
+# Si con el par correcto igual da 401: (1) Enforced=False (gateway), (2) Envoy
+# tiró los headers con underscore (EnvoyFilter de 00), (3) el Secret no tiene
+# la label managed-by=authorino.

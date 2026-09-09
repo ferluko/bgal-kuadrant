@@ -1,0 +1,109 @@
+# ORIGEN paas-lab — ingreso del BFF por openshift-default, NO por gw-hostnet.
+#
+# Por qué no se reusa gw-hostnet: en arqlab ninguna AuthPolicy sobre ese gateway está
+# Enforced (waiting for Gateway connlink-ingress/gw-hostnet) y el cert SDS queda en
+# warming. Sobre openshift-default las dos cosas funcionan en este mismo cluster
+# (egress-gw: AuthPolicy Enforced=True). Ver destino-arqlab/00-DECISION-ingreso.md.
+#
+# El consumidor pega HTTP a bff-lab.paas-demo…; el router publica este Gateway (Route
+# sin TLS). Si ya existe otra Route con ese host (p.ej. directo al Service bff),
+# HostAlreadyClaimed: hay que repuntearla a bff-gw-lab-openshift-default o borrarla.
+#
+# Envoy, por default, puede TIRAR cabeceras con underscore (`api_key`, `client_key`).
+# El EnvoyFilter de abajo las deja pasar. Sin eso la AuthPolicy 19 ve 401 aunque curl
+# mande los headers.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: bff-gw-lab
+  namespace: poc-egress-kuadrant
+  labels:
+    kuadrant.io/gateway: "true"
+  annotations:
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bff-lab
+  namespace: poc-egress-kuadrant
+spec:
+  parentRefs:
+    - name: bff-gw-lab
+      sectionName: http
+  hostnames:
+    - "bff-lab.paas-demo.bancogalicia.com.ar"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: bff
+          port: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: bff-lab
+  namespace: poc-egress-kuadrant
+  labels:
+    poc.galicia.io/rol: origen-paas-lab
+spec:
+  host: bff-lab.paas-demo.bancogalicia.com.ar
+  to:
+    kind: Service
+    name: bff-gw-lab-openshift-default
+    weight: 100
+  port:
+    targetPort: 80
+  wildcardPolicy: None
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: bff-gw-lab-allow-underscores
+  namespace: poc-egress-kuadrant
+spec:
+  workloadSelector:
+    labels:
+      gateway.networking.k8s.io/gateway-name: bff-gw-lab
+  configPatches:
+    - applyTo: NETWORK_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+      patch:
+        operation: MERGE
+        value:
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+            common_http_protocol_options:
+              headers_with_underscores_action: ALLOW
+---
+# Aplicar:
+#   oc --context=paas-lab apply -f origen-paas-lab/00-httproute-bff-lab.yaml
+#
+# Confirmar el Service que creó el Gateway (el nombre de la Route depende de esto):
+#   oc --context=paas-lab -n poc-egress-kuadrant get svc \
+#     -l gateway.networking.k8s.io/gateway-name=bff-gw-lab
+#
+#   oc --context=paas-lab -n poc-egress-kuadrant get httproute bff-lab \
+#     -o jsonpath='{range .status.parents[*]}{.parentRef.name} {range .conditions[*]}{.type}={.status} {end}{"\n"}{end}'
+#   oc --context=paas-lab -n poc-egress-kuadrant get route bff-lab \
+#     -o jsonpath='HOST={.spec.host} SVC={.spec.to.name} ADMITIDA={.status.ingress[0].conditions[?(@.type=="Admitted")].status}{"\n"}'
+#
+# GATE Kuadrant: el Gateway tiene que quedar Programmed y la AuthPolicy 19 Enforced=True.
+# Si Enforced=False con motivo gw-hostnet, esta HTTPRoute NO está attacheada acá.

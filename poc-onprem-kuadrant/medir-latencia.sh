@@ -28,6 +28,9 @@
 #
 # Si el FQDN no resuelve desde el bastión:
 #   URL=http://<vip-paas-lab> HOST=bff-lab.paas-demo.bancogalicia.com.ar ./medir-latencia.sh
+#
+# Con la AuthPolicy de ingreso (19-authpolicy-bff-apikey.yaml) hay que mandar el par:
+#   API_KEY=lab-api-key-not-for-prod CLIENT_KEY=lab-client-key-not-for-prod ./medir-latencia.sh
 set -uo pipefail
 
 N="${1:-100}"
@@ -35,20 +38,28 @@ MODO="${2:-}"
 PAR="${3:-1}"
 URL="${URL:-http://bff-lab.paas-demo.bancogalicia.com.ar}"
 HOST="${HOST:-bff-lab.paas-demo.bancogalicia.com.ar}"
+API_KEY="${API_KEY:-}"
+CLIENT_KEY="${CLIENT_KEY:-}"
 
 command -v jq >/dev/null || { echo "falta jq"; exit 2; }
 
-python3 - "$N" "$MODO" "$URL" "$HOST" "$PAR" <<'PY'
+python3 - "$N" "$MODO" "$URL" "$HOST" "$PAR" "$API_KEY" "$CLIENT_KEY" <<'PY'
 import json, subprocess, sys, collections, time
 from concurrent.futures import ThreadPoolExecutor
 
 n, modo, url, host = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 par = max(1, int(sys.argv[5])) if modo == "--par" else 1
 ab = (modo == "--ab")
+api_key = sys.argv[6] if len(sys.argv) > 6 else ""
+client_key = sys.argv[7] if len(sys.argv) > 7 else ""
 
 def pedir(i):
     canary = ab and (i % 2 == 1)
     cmd = ["curl", "-s", "--max-time", "20", "-H", "Host: " + host]
+    if api_key:
+        cmd += ["-H", "api_key: " + api_key]
+    if client_key:
+        cmd += ["-H", "client_key: " + client_key]
     if canary:
         cmd += ["-H", "x-canary: true"]
     cmd += [url + "/"]
@@ -88,6 +99,11 @@ pct = lambda v, q: v[min(len(v) - 1, int(len(v) * q))]
 print("\nmodo: %s   requests: %d   duracion: %.1fs" %
       ("EN SERIE" if par == 1 else "PARALELO x%d" % par, n, wall))
 print("bff: %s  Host: %s" % (url, host))
+if api_key or client_key:
+    print("ingreso: api_key=%s  client_key=%s" %
+          ("set" if api_key else "VACIO", "set" if client_key else "VACIO"))
+else:
+    print("ingreso: sin api_key/client_key (la AuthPolicy bff-lab-apikey va a devolver 401)")
 if par > 1:
     print("throughput: %.1f req/s   (los percentiles incluyen tiempo en cola: NO comparar con la corrida en serie)"
           % (n / wall if wall else 0))

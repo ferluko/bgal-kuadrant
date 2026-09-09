@@ -73,6 +73,9 @@ oc --context=paas-lab -n kuadrant-system rollout status deployment authorino
 oc --context=paas-lab apply -f origen-paas-lab/03-serviceentry-destino.yaml
 oc --context=paas-lab apply -f origen-paas-lab/04-destinationrule-tls.yaml   # ver el recuadro
 oc --context=paas-lab apply -f origen-paas-lab/02-authpolicy-origen.yaml
+oc --context=paas-lab apply -f origen-paas-lab/00-httproute-bff-lab.yaml
+oc --context=paas-lab apply -f origen-paas-lab/18-secret-consumer-bff.yaml
+oc --context=paas-lab apply -f origen-paas-lab/19-authpolicy-bff-apikey.yaml
 
 # ── DESTINO arqlab ────────────────────────────────────────────────────────────
 # el cert: copiar shard1-paas-demo (su SAN cubre app3) al ns de la PoC — ver 10-gateway-ingress
