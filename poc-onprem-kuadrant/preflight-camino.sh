@@ -256,7 +256,20 @@ esc "C2bis — Matriz de aislamiento del TLS" \
 # el problema es la config del F5 y no Envoy. Y si anda con el SNI del certificado pero no
 # con el logico, es matching de SNI en Envoy — que ademas responde qué poner en el
 # DestinationRule (origen-paas-lab/04).
-NODO=$(ocd get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+# gw-hostnet es hostNetwork: escucha en las IPs de SUS nodos, que no son cualquier nodo.
+# Tomar .items[0] de todos los nodos es un error: ahí contesta el router default (se delata
+# por el certificado *.apps.…) y uno concluye "el nodo anda" sin haber tocado el gateway.
+NODO=$(ocd -n "$NS_GW" get pods -l "gateway.networking.k8s.io/gateway-name=$GW" \
+        -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null)
+if [[ -n "$NODO" ]]; then
+  nota "nodos donde corre $GW (hostNetwork):"
+  ocd -n "$NS_GW" get pods -l "gateway.networking.k8s.io/gateway-name=$GW" \
+    -o custom-columns='POD:.metadata.name,NODO:.spec.nodeName,HOSTIP:.status.hostIP,ESTADO:.status.phase' \
+    --no-headers 2>/dev/null | sed 's/^/        /'
+else
+  nota "no pude ubicar los pods de $GW; uso un nodo cualquiera (probablemente NO sea el gateway)"
+  NODO=$(ocd get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+fi
 printf '  %-26s %-42s %s\n' "DESTINO" "SNI" "RESULTADO"
 for tgt_lbl in "VIP:$TARGET" "NODO:${NODO:-}"; do
   tgt_ip="${tgt_lbl#*:}"; [[ -z "$tgt_ip" ]] && continue
@@ -274,11 +287,15 @@ for tgt_lbl in "VIP:$TARGET" "NODO:${NODO:-}"; do
     printf '  %-26s %-42s %s\n' "${tgt_lbl%%:*} $tgt_ip" "$sni" "$RES"
   done
 done
-nota "Lectura:"
-nota "  NODO ok + VIP falla            -> el F5/VIP no está publicando el 443 de gw-hostnet"
-nota "  SNI del cert ok + logico falla -> matching de SNI en Envoy; usar ese SNI en 04, o"
-nota "                                    reemitir el cert con el nombre logico en los SAN"
-nota "  los cuatro fallan              -> mirar el listener https del Gateway (C5) y el cert"
+nota "Lectura — MIRAR PRIMERO EL CERTIFICADO, dice QUIÉN atendió:"
+nota "  cert con CN shard1.paas-demo…     -> llegaste al gw-hostnet. Recién ahí el resto vale."
+nota "  cert con *.apps.paas-arqlab…      -> te atendió el ROUTER DEFAULT, no el gateway."
+nota "                                       Un 'tls_ok' contra el router NO prueba nada del"
+nota "                                       gateway; el 503 que sigue es del router."
+nota "Después:"
+nota "  NODO(gw) ok + VIP falla           -> el F5/VIP no publica el 443 de gw-hostnet"
+nota "  SNI del cert ok + logico falla    -> matching de SNI en Envoy; usar ese SNI en 04"
+nota "  los cuatro fallan                 -> listener https del Gateway (C5) y el cert"
 
 # ─────────────────────────────────────────────────────────────────────────────
 esc "C3 — Plataforma en arqlab" "que exista lo que los manifiestos 10-13 dan por sentado"
@@ -407,8 +424,17 @@ fi
 
 # Todas las AuthPolicy que compiten por el mismo gateway: si dos apuntan al mismo targetRef,
 # Kuadrant marca una como overridden y podés estar mirando el status de la que NO se aplica.
-nota "AuthPolicy en $NS_DST (revisar overridden):"
-ocd -n "$NS_DST" get authpolicy -o custom-columns='NOMBRE:.metadata.name,TARGET:.spec.targetRef.name,ACC:.status.conditions[?(@.type=="Accepted")].status,ENF:.status.conditions[?(@.type=="Enforced")].status' --no-headers 2>/dev/null | sed 's/^/        /'
+nota "AuthPolicy en $NS_DST:"
+APALL=$(ocd -n "$NS_DST" get authpolicy -o custom-columns='NOMBRE:.metadata.name,TARGET:.spec.targetRef.name,ACC:.status.conditions[?(@.type=="Accepted")].status,ENF:.status.conditions[?(@.type=="Enforced")].status' --no-headers 2>/dev/null)
+printf '%s\n' "$APALL" | sed 's/^/        /'
+NTOT=$(printf '%s\n' "$APALL" | grep -c . )
+NENF=$(printf '%s\n' "$APALL" | awk 'NF && $NF=="True"' | grep -c . )
+if [[ "${NTOT:-0}" -gt 0 && "${NENF:-0}" -eq 0 ]]; then
+  bad "alguna AuthPolicy del namespace enforcea" "0 de $NTOT" ">=1"
+  nota "NINGUNA está Enforced. No es un detalle: sobre ese gateway NO se aplica autorización"
+  nota "a nada, y por eso pasa cualquier token. Es la explicación del hallazgo de claims."
+  nota "Un Enforced=False que PERSISTE no es transitorio — ver 14-diagnostico-claims.md."
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 printf '\n%s══ Resumen ══%s\n' "$B" "$Z"

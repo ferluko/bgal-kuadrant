@@ -300,7 +300,25 @@ real que el `sub` volvió a `.../poc/egress-gw`.
 
 **Esto es un hallazgo de seguridad real y confirmado, no un falso positivo de la prueba anterior.**
 
-### Actualización 2026-09-09 — dos hipótesis refutadas, y el dato que falta
+### RESUELTO 2026-09-09 — las AuthPolicy sobre `gw-hostnet` nunca estuvieron enforceadas
+
+**Causa raíz encontrada.** Las tres `AuthPolicy` del namespace están en `Enforced: False`, con el
+mensaje `AuthPolicy waiting for the following components to sync: [Gateway (connlink-ingress/gw-hostnet)]`.
+No hubo evaluación de claims porque no hubo autorización aplicándose sobre ese gateway.
+
+El `Enforced: False` que el 2026-09-02 se descartó como *"estado transitorio justo después de crear
+el recurso"* **no era transitorio**: sigue igual semanas después. Esa lectura errónea desvió toda la
+investigación. Los filtros presentes en el `config_dump` no lo contradicen: Kuadrant instala el
+`ext_authz` por la label `kuadrant.io/gateway` del Gateway, pero puebla las *action sets* recién
+cuando una policy queda `Enforced` — filtro sin action sets deja pasar todo sin loguear nada.
+
+Diagnóstico completo, hipótesis descartadas y salidas en
+[`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md).
+
+**Consecuencia que excede a la PoC**: el ingreso `gw-hostnet` no aplica ninguna política de
+autorización de Kuadrant, y su status lo venía diciendo desde que se creó.
+
+### (histórico) Actualización 2026-09-09 — dos hipótesis refutadas, y el dato que falta
 
 Se investigaron y **descartaron con evidencia** las dos explicaciones más plausibles. Quedan
 anotadas para que nadie las vuelva a recorrer:
