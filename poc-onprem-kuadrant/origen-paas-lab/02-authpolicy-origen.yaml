@@ -1,7 +1,8 @@
 # ORIGEN paas-lab — BLOQUEANTE #2: hoy NO EXISTE ninguna AuthPolicy en este cluster.
 # Confirmado por el preflight (2026-09-09): Gateway, HTTPRoute, ServiceEntry y DestinationRule
 # están todos armados y correctos, pero nada inyecta el token. Sin esto el destino rechaza —
-# o, dado el hallazgo abierto de claims, lo deja pasar y parece que funcionó.
+# o, mientras el ingreso de arqlab no enforcee (ver destino-arqlab/14-diagnostico-claims.md),
+# lo deja pasar y parece que funcionó.
 #
 # Adaptado de poc-egress-kuadrant/origen/vault/03-authpolicy-origen-ocp.yaml (arqlab).
 # Lo que cambia respecto de arqlab, y por qué:

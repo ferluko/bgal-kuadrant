@@ -473,37 +473,62 @@ un listener por hostname.
 openssl x509 -in <cert>.crt -noout -subject -ext subjectAltName -dates
 ```
 
-### 7.2 El bloqueo: el certificado no llega por SDS — **RESUELTO (2026-09-09)**
+### 7.2 El bloqueo: el certificado no llega por SDS — **SIGUE ABIERTO (verificado 2026-09-09)**
 
-> **ESTE BLOQUEO YA NO EXISTE.** Estado verificado del Gateway el 2026-09-09:
+> **Confirmado que NO está resuelto.** El `config_dump` del proxy, que es el único indicador
+> confiable:
 >
 > ```
-> listener https:443   Accepted=True  Programmed=True  ResolvedRefs=True  attachedRoutes=3
-> certificateRefs:     Secret/shard1-paas-demo, mode Terminate
-> Gateway Programmed:  "assigned to service(s) …:443 and …:80"   (transición 2026-09-03)
+> activos : ['default', 'ROOTCA']
+> warming : ['kubernetes-gateway://connlink-ingress/shard1-paas-demo',
+>            'kubernetes://destino-ca-cacert']
 > ```
 >
-> `ResolvedRefs=True` en el listener significa que el `certificateRefs` resolvió: Envoy tiene el
-> certificado. No quedó registrado cuál de los pendientes de más abajo lo destrabó — si alguien
-> lo sabe, vale anotarlo acá.
+> El listener 443 muestra `ResolvedRefs=True` y aun así **el certificado nunca llegó**. Esa
+> condition en verde con el secret en `warming` ES el hallazgo — no lo contradice. Durante unas
+> horas se dio el bloqueo por resuelto leyendo la condition; fue un error, y este archivo ya
+> advertía que no alcanza.
 >
-> **Consecuencias, para no arrastrar decisiones viejas:**
-> - El 443 de `gw-hostnet` es utilizable. Los diseños que lo esquivaban ya no se justifican:
->   `poc-onprem-kuadrant/` descartó por esto su Gateway `openshift-default` + Route passthrough
->   (ver `poc-onprem-kuadrant/destino-arqlab/11-DESCARTADO-gateway-propio.md`).
-> - El **experimento de control** que se lista abajo (punto 2 de "Pendiente de probar") perdió
->   su motivo original. Y la sospecha de que este mismo mecanismo explicara el hallazgo de
->   claims que no rechazan quedó **refutada por separado**: el Envoy de `gw-hostnet` SÍ tiene los
->   filtros de Kuadrant (63 `authorino`, 7 `ext_authz`, 149 `kuadrant` en su `config_dump`).
->   Ver `poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`.
-> - Lo que **sigue vigente** de esta sección es §7.1, y en particular la advertencia sobre los
->   SAN del certificado: `shard1-paas-demo` puede ser de un solo nombre, y entonces no cubre
->   `bff-arqlab.paas-demo…` ni `app3.paas-demo…`. Es el sospechoso principal del ingreso al
->   `bff` — ver `poc-onprem-kuadrant/destino-arqlab/12-ingress-bff-arqlab.md`.
+> **Dato nuevo, y agrava el diagnóstico**: son *dos* secrets atascados, no uno
+> (`destino-ca-cacert` también). No es un Secret puntual mal referenciado: **ese proxy no recibe
+> material criptográfico por SDS, punto.**
 >
-> Lo que sigue se conserva como registro de lo que se descartó mientras estuvo abierto.
+> **Consecuencia práctica**: cualquier handshake TLS contra `gw-hostnet:443` resetea. Medido desde
+> paas-lab (`tls:ConnectionResetError` con los dos SNI probados).
+>
+> **Segundo problema, independiente y peor**: ninguna `AuthPolicy` sobre este gateway está
+> `Enforced` — Kuadrant reporta que no lo sincroniza. Los dos síntomas juntos (no recibe secrets,
+> Kuadrant no lo sincroniza) apuntan a que istiod no asocia este proxy al recurso `Gateway`, que es
+> lo que decía el log histórico de abajo. **Hipótesis, no conclusión** — verificación y salidas en
+> `poc-onprem-kuadrant/destino-arqlab/00-DECISION-ingreso.md`.
 
-
+> **Puede estar resuelto, pero NO está probado.** El listener `https` del Gateway pasó a
+> `Accepted=True Programmed=True ResolvedRefs=True` con el Secret `shard1-paas-demo`, y tiene
+> routes attacheadas (transición del `Programmed` el 2026-09-03).
+>
+> **`ResolvedRefs=True` NO prueba que el certificado llegó al proxy** — lo dice esta misma sección
+> y lo repite `ocp-destino/10-gateway-ingress-hostnet.yaml`. Es exactamente el síntoma que motivó
+> el hallazgo: la condition en verde mientras el secret quedaba en `warming`. El único indicador
+> confiable es `dynamic_active_secrets` en el `config_dump`:
+>
+> ```bash
+> oc -n connlink-ingress exec ds/gw-hostnet -c istio-proxy -- \
+>   pilot-agent request GET config_dump | python3 -c '
+> import json,sys
+> d=json.load(sys.stdin)
+> for c in d["configs"]:
+>     if "SecretsConfigDump" in c.get("@type",""):
+>         print("activos :", [s.get("name") for s in c.get("dynamic_active_secrets",[])])
+>         print("warming :", [s.get("name") for s in c.get("dynamic_warming_secrets",[])])
+> '
+> ```
+>
+> Si `shard1-paas-demo` aparece en **activos**, el bloqueo está cerrado y esta sección se puede
+> archivar. Si sigue en **warming**, no lo está, por más que la condition diga lo contrario.
+>
+> Lo que sí quedó descartado por separado: que este mecanismo explicara las `AuthPolicy` que no
+> rechazan. Esa causa es otra y está identificada — ver
+> `poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`.
 
 Envoy pide el secret pero nunca lo recibe:
 

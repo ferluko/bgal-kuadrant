@@ -23,30 +23,23 @@ Del preflight de federación (`scripts/preflight-paas-lab.sh`, 2026-09-09):
 | GatewayClass | `openshift-default` presente en 4.18 (OSSM3 3.3.7) |
 | CRD AuthPolicy | **sin** `credentials.customHeader.prefix` (dialecto upstream) — no usarlo igual |
 
-## 2. Diseño del ingreso en arqlab — se reusa `gw-hostnet`
+## 2. Diseño del ingreso en arqlab — Gateway propio `openshift-default`
 
-**Cambió el 2026-09-09.** La versión anterior de este documento montaba un `Gateway`
-`openshift-default` propio con una `Route` de passthrough, para esquivar el bloqueo de SDS del
-`runbook-gw-istio-hostnetwork.md` §7.2 (el 443 de `gw-hostnet` no recibía el certificado).
+**No se reusa `gw-hostnet`.** Dos bloqueos medidos, ninguno resoluble desde esta PoC:
 
-**Ese bloqueo está resuelto**: el listener `https:443` de `gw-hostnet` está
-`Accepted=True Programmed=True ResolvedRefs=True` con el Secret `shard1-paas-demo`, y ya tiene
-3 routes attacheadas. Con el 443 andando, el Gateway propio pasa a ser peor en todo — cuatro
-piezas nuevas contra una, un certificado más que mantener, y sobre todo un camino de red que
-**no es el de producción**, lo que vuelve menos concluyente cualquier cosa que se mida ahí.
+1. **Su listener 443 no tiene certificado.** El `config_dump` del proxy muestra
+   `shard1-paas-demo` en `warming`, nunca en `activos` — el bloqueo de SDS del runbook §7.2 sigue
+   abierto. Por eso cualquier handshake TLS contra ese gateway resetea (medido desde paas-lab).
+   `ResolvedRefs=True` no lo contradice: esa condition en verde con el secret en `warming` **es**
+   el hallazgo.
+2. **Ninguna `AuthPolicy` sobre él está `Enforced`** (§6). Para una PoC de autorización, esto solo
+   ya lo descalifica: aunque el TLS anduviera, no se estaría midiendo nada.
 
-Detalle completo de la reversión en `destino-arqlab/11-DESCARTADO-gateway-propio.md`, incluido
-el único caso en que convendría reabrirla.
+Sobre `openshift-default` las dos cosas funcionan en este mismo cluster (`egress-gw` lo demuestra:
+`AuthPolicy` en `Enforced: True`), y `destino-ocp/` ya usó este patrón contra `paas-dev1-lowmz`.
 
-Del lado destino queda **una sola pieza de red**: la HTTPRoute `backend-lab`. Convive con la
-`backend` que ya atiende a EKS sobre el mismo gateway porque los hostnames son distintos:
-
-```
-paas-lab (ns poc-egress-kuadrant)   →  Host: backend.poc-egress-kuadrant.svc.cluster.local
-EKS      (ns poc-ingress-kuadrant)  →  Host: backend.poc-ingress-kuadrant.svc.cluster.local
-```
-
-El gateway de egreso no reescribe el Host: lo que llega es el FQDN interno del origen.
+Esta decisión dio tres vueltas en un día. Están las tres, con lo que invalidó cada una, en
+`destino-arqlab/00-DECISION-ingreso.md`.
 
 ## 3. Nombres y certificado
 
@@ -88,8 +81,17 @@ oc --context=paas-lab apply -f origen-paas-lab/04-destinationrule-tls.yaml   # v
 oc --context=paas-lab apply -f origen-paas-lab/02-authpolicy-origen.yaml
 
 # ── DESTINO arqlab ────────────────────────────────────────────────────────────
-oc --context=paas-arqlab apply -f destino-arqlab/10-httproute-backend.yaml
+# el cert: copiar shard1-paas-demo (su SAN cubre app3) al ns de la PoC — ver 10-gateway-ingress
+oc --context=paas-arqlab -n connlink-ingress get secret shard1-paas-demo -o yaml \
+  | sed 's/namespace: connlink-ingress/namespace: poc-ingress-kuadrant/' \
+  | grep -v '^\s*\(resourceVersion\|uid\|creationTimestamp\|selfLink\)' \
+  | oc --context=paas-arqlab apply -f -
+oc --context=paas-arqlab apply -f destino-arqlab/10-gateway-ingress.yaml
+oc --context=paas-arqlab apply -f destino-arqlab/11-route-passthrough.yaml
+oc --context=paas-arqlab apply -f destino-arqlab/12-httproute-backend.yaml
 oc --context=paas-arqlab apply -f destino-arqlab/13-authpolicy-vault-spiffe.yaml
+# GATE: el cert TIENE que llegar al proxy nuevo. Si queda en `warming` como en gw-hostnet,
+# parar acá — es plataforma, no la PoC. Comando en 10-gateway-ingress.yaml.
 
 # ── verificar ANTES del corte ─────────────────────────────────────────────────
 CTX_ORI=paas-lab CTX_DST=paas-arqlab ./preflight-camino.sh
@@ -113,13 +115,16 @@ La trampa principal. Cambiar el `backendRef` del HTTPRoute **no alcanza**:
 
 El tercero es el que engaña: el 403 aparece con retraso y parece un problema de red.
 
-## 6. Antes de creerle a un 200
+## 6. `gw-hostnet` está roto en dos frentes — elevar, no absorber
 
-`destino-arqlab/14-diagnostico-claims.md`. Está confirmado en vivo que el bloque
-`claims-esperados` del destino OCP no rechazaba (pasó un `sub` impostor). Al 2026-09-09 hay dos
-hipótesis **refutadas con evidencia** (poda de schema del CRD; istiod que no empuja el
-`ext_authz`) y un árbol de decisión que arranca en un único dato todavía sin obtener:
-**¿Authorino llegó a ver el request?**
+Las tres `AuthPolicy` de `poc-ingress-kuadrant` en arqlab están en **`Enforced: False`**
+(`waiting for … [Gateway (connlink-ingress/gw-hostnet)]`), y ese mismo proxy **no recibe secrets
+por SDS** (dos atascados en `warming`). Esta PoC lo esquiva con su propio Gateway, pero el
+problema queda:
 
-Mientras eso no esté cerrado, un 200 no prueba que la autorización funcione — solo que el
-tráfico llega.
+**hoy nada publicado por `gw-hostnet` tiene TLS propio ni política de autorización de Kuadrant**,
+y su status lo viene diciendo desde que se creó.
+
+Causa raíz del no-enforcement en `destino-arqlab/14-diagnostico-claims.md`; la hipótesis que une
+los dos síntomas, y los comandos para confirmarla antes de abrir el caso con Red Hat, en
+`destino-arqlab/00-DECISION-ingreso.md`.

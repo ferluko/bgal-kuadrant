@@ -23,8 +23,8 @@ NS="${NS:-poc-egress-kuadrant}"                           # ns en el origen
 NS_DST="${NS_DST:-poc-ingress-kuadrant}"                  # ns en el destino
 HOST_INTERNO="${HOST_INTERNO:-backend.poc-egress-kuadrant.svc.cluster.local:8080}"
 # Rediseño 2026-09-09: se reusa gw-hostnet (su 443 funciona), no hay Gateway propio ni Route.
-NS_GW="${NS_GW:-connlink-ingress}"
-GW="${GW:-gw-hostnet}"
+NS_GW="${NS_GW:-poc-ingress-kuadrant}"
+GW="${GW:-ingress-gw-lab}"
 LISTENER="${LISTENER:-https}"
 CERT_SECRET="${CERT_SECRET:-shard1-paas-demo}"
 SNI_CERT="${SNI_CERT:-shard1.paas-demo.bancogalicia.com.ar}"  # el nombre que el cert SÍ cubre
@@ -230,8 +230,8 @@ else
     case "$ST" in
       401|403) ok "GET sin token -> rechazo" "$ST"; nota "el destino enforcea: prueba negativa OK" ;;
       200) bad "GET sin token -> rechazo" "$ST" "401 o 403"
-           nota "EL DESTINO CONTESTA SIN EXIGIR TOKEN. Es exactamente el hallazgo abierto."
-           nota "Antes de seguir, leer destino-arqlab/14-diagnostico-claims.md." ;;
+           nota "EL DESTINO CONTESTA SIN EXIGIR TOKEN. Coincide con el bloqueante conocido: las"
+           nota "AuthPolicy sobre gw-hostnet no estan Enforced. Ver 14-diagnostico-claims.md." ;;
       503) skip "GET sin token" "503 del router — Route sin endpoints o Gateway sin montar" ;;
       404) skip "GET sin token" "404 — el Host no matchea ningún HTTPRoute (revisar 10-httproute-backend.yaml)" ;;
       *)   skip "GET sin token" "status=$ST" ;;
@@ -293,7 +293,10 @@ nota "  cert con *.apps.paas-arqlab…      -> te atendió el ROUTER DEFAULT, no
 nota "                                       Un 'tls_ok' contra el router NO prueba nada del"
 nota "                                       gateway; el 503 que sigue es del router."
 nota "Después:"
-nota "  NODO(gw) ok + VIP falla           -> el F5/VIP no publica el 443 de gw-hostnet"
+nota "  todo resetea, con cualquier SNI   -> el listener NO TIENE CERTIFICADO. Es el caso ya"
+nota "                                       medido en gw-hostnet (secret en warming). Verificar"
+nota "                                       con dynamic_active_secrets ANTES de culpar al F5."
+nota "  NODO(gw) ok + VIP falla           -> ahí sí, el F5/VIP no publica el 443"
 nota "  SNI del cert ok + logico falla    -> matching de SNI en Envoy; usar ese SNI en 04"
 nota "  los cuatro fallan                 -> listener https del Gateway (C5) y el cert"
 
@@ -396,7 +399,7 @@ if ocd -n "$NS_DST" get httproute "$ROUTE" >/dev/null 2>&1; then
   HN=$(ocd -n "$NS_DST" get httproute "$ROUTE" -o jsonpath='{.spec.hostnames[*]}' 2>/dev/null)
   nota "hostname que matchea: $HN"
   nota "el origen manda ese FQDN CON ':8080' (el egreso no reescribe el Host). Gateway API"
-  nota "matchea sin puerto, pero es la hipótesis abierta de la rama A de 14-diagnostico-claims.md."
+  nota "matchea sin puerto; si ves 404 del gateway (no del F5), es el primer lugar donde mirar."
 else
   bad "HTTPRoute $ROUTE en $NS_DST" "ausente" "presente"
 fi

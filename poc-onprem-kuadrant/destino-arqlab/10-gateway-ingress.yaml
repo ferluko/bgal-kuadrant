@@ -1,0 +1,59 @@
+# DESTINO arqlab — Gateway de ingreso de la PoC. Ver 00-DECISION-ingreso.md para por qué NO se
+# reusa gw-hostnet: su listener 443 no tiene certificado (SDS en `warming`) y ninguna AuthPolicy
+# sobre él está Enforced. Los dos bloqueos son del gateway desplegado a mano; sobre
+# openshift-default ambas cosas funcionan en este mismo cluster (egress-gw lo demuestra).
+#
+# Con Route en passthrough NO hace falta MetalLB: el Gateway va ClusterIP y lo publica el router.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ingress-gw-lab
+  namespace: poc-ingress-kuadrant
+  labels:
+    kuadrant.io/gateway: "true"     # sin esta label Kuadrant ni instala el ext_authz
+  annotations:
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: shard1-paas-demo
+      # SIN `hostname`. El cert es multi-SAN (shard1 + app1/app2/app3.paas-demo, verificado
+      # 2026-09-09), así que dejar el matching a los HTTPRoute es lo correcto. Fijar un hostname
+      # acá es la forma más rápida de romperlo: sin filter chain que matchee el SNI, Envoy
+      # resetea con un error que no señala a la causa (runbook §7.1).
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# EL SECRET: `shard1-paas-demo` vive hoy en `connlink-ingress` y su SAN cubre app3.paas-demo.
+# Hay que copiarlo a ESTE namespace (los certificateRefs cross-namespace requieren ReferenceGrant,
+# y ese camino es justamente el que viene fallando en gw-hostnet — no meterse ahí):
+#
+#   oc --context=paas-arqlab -n connlink-ingress get secret shard1-paas-demo -o yaml \
+#     | sed 's/namespace: connlink-ingress/namespace: poc-ingress-kuadrant/' \
+#     | grep -v '^\s*\(resourceVersion\|uid\|creationTimestamp\|selfLink\)' \
+#     | oc --context=paas-arqlab apply -f -
+#
+# VERIFICACIÓN QUE SÍ VALE — `ResolvedRefs=True` NO prueba que el cert llegó al proxy (es
+# exactamente el síntoma del runbook §7.2). El indicador confiable:
+#
+#   oc --context=paas-arqlab -n poc-ingress-kuadrant get pods -l gateway.networking.k8s.io/gateway-name=ingress-gw-lab
+#   oc --context=paas-arqlab -n poc-ingress-kuadrant exec <pod> -c istio-proxy -- \
+#     pilot-agent request GET config_dump | python3 -c '
+#   import json,sys
+#   d=json.load(sys.stdin)
+#   for c in d["configs"]:
+#       if "SecretsConfigDump" in c.get("@type",""):
+#           print("activos:", [s.get("name") for s in c.get("dynamic_active_secrets",[])])
+#           print("warming:", [s.get("name") for s in c.get("dynamic_warming_secrets",[])])
+#   '
+#
+# El cert TIENE que aparecer en `activos`. Si queda en `warming`, este camino tiene el mismo
+# problema que gw-hostnet y hay que parar acá: no es un tema de la PoC sino de plataforma.

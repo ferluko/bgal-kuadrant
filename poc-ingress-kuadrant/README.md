@@ -66,10 +66,10 @@ kubectl --context=devops-cilium-1-35 apply -f eks-origen/07-networkpolicy.yaml
    `9B:E7:80:85:7F:57:2F:38:49:B1:BE:7C:9D:93:39:14:D0:B2:BC:7E` (`CN=Root CA Banco Galicia`).
    Verificar por AKI/SKI con `openssl verify`/`openssl x509 -text`, **no por nombre** — ya nos
    pasaron un cert con nombre plausible que no cerraba criptográficamente.
-2. **Bloqueo de SDS en `gw-hostnet` (runbook §7.2).** Sin resolver al momento de escribir
-   esto. `ocp-destino/10-gateway-ingress-hostnet.yaml` está armado para el estado *ideal*
-   (Envoy termina TLS), con el workaround de F5 documentado como fallback si sigue
-   bloqueado cuando toque implementar.
+2. **Bloqueo de SDS en `gw-hostnet` (runbook §7.2) — verificar antes de asumir.** El listener
+   443 pasó a `ResolvedRefs=True` (2026-09-03), pero eso **no prueba** que el cert llegó al
+   proxy: el único indicador confiable es `dynamic_active_secrets` en el `config_dump` (comando
+   en el runbook §7.2). Si sigue en `warming`, aplica el workaround de F5 del runbook §7.3.
 3. **Bug de escaping en `RateLimitPolicy.counters`** — confirmado en Kuadrant 1.4.2 (EKS),
    no confirmado todavía en RHCL 1.3 (OCP). Verificar antes de asumir que hace falta el
    mismo workaround (dos `counters` simples en vez de uno concatenado).

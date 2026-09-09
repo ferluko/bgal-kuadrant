@@ -471,8 +471,9 @@ cat <<'FIN'
 
   2. EL SUB DE paas-lab hay que habilitarlo en el destino (hoy pinean un único sub con '==').
 
-  3. LA VALIDACIÓN DE CLAIMS DEL DESTINO OCP ESTÁ CONFIRMADA COMO NO EFECTIVA (hallazgo abierto:
-     un sub 'impostor' pasó igual). Si paas-lab apunta a arqlab, un PASS puede ser falso positivo.
-     Probar el rechazo explícitamente, no asumirlo.
+  3. EL INGRESO gw-hostnet DE arqlab NO ENFORCEA: ninguna AuthPolicy sobre ese gateway está
+     Enforced (Kuadrant reporta que no lo sincroniza). Mientras siga así, un 200 cruzando a
+     arqlab no prueba que la autorización funcione. Ver
+     poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md.
 FIN
 exit 0

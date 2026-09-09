@@ -1,0 +1,39 @@
+# DESTINO arqlab — la route que recibe el tráfico de paas-lab.
+#
+# El hostname es el FQDN INTERNO DEL ORIGEN, no app3: el Host header nunca se reescribe, así que
+# lo que llega es literalmente backend.poc-egress-kuadrant.svc.cluster.local. app3 solo vive en
+# el SNI, y eso ya lo resolvió la Route passthrough (11).
+#
+# Nótese que NO choca con la HTTPRoute `backend` que atiende a EKS: esa matchea
+# backend.poc-INGRESS-kuadrant.svc.cluster.local. Namespaces de origen distintos, hostnames
+# distintos.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: backend-lab
+  namespace: poc-ingress-kuadrant
+spec:
+  parentRefs:
+    - name: ingress-gw-lab
+      sectionName: https
+  hostnames:
+    - "backend.poc-egress-kuadrant.svc.cluster.local"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend
+          port: 8080
+---
+# Verificar que el Gateway la adoptó DE VERDAD:
+#   oc --context=paas-arqlab -n poc-ingress-kuadrant get httproute backend-lab \
+#     -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status} {end}{end}{"\n"}'
+#
+# Si el status trae SOLO condiciones kuadrant.io/*, el controller de Gateway API nunca procesó la
+# route: el problema está en el Gateway (típicamente el listener sin certificado), no en la policy.
+#
+# OJO CON EL PUERTO EN EL HOST: el origen manda "…cluster.local:8080". Gateway API matchea el
+# hostname sin puerto, así que esto es correcto — pero si ves 404 del gateway (no del router), es
+# el primer lugar donde mirar.

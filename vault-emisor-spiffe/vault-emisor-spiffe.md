@@ -233,7 +233,13 @@ distinto al de EKS) la respuesta fue **`200 OK` con el body real del backend**, 
 Esto confirma que Authorino en OCP validó correctamente el JWT-SVID minteado por Vault —
 `jwksUrl`, `prefix: "Bearer "` y los claims contra `sub` funcionan como se documentó arriba.
 
-## 2quater. Prueba negativa (2026-09-02) — HALLAZGO CRÍTICO: OCP no está rechazando nada
+## 2quater. Prueba negativa (2026-09-02) — CERRADO el 2026-09-09
+
+> **Resuelto.** La causa era que ninguna `AuthPolicy` sobre `gw-hostnet` estaba `Enforced`; no había
+> autorización aplicándose. Detalle, hipótesis descartadas y salidas en
+> [`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md).
+> Lo que sigue es el registro de cómo se llegó ahí — útil por el método de la prueba negativa, que
+> es reutilizable.
 
 La prueba anterior (§2ter) solo confirmó que el tráfico *pasaba* con un token válido — no que algo
 lo estuviera *validando*. Para probar el rechazo de verdad, hacía falta llegar a OCP sin pasar por
@@ -302,64 +308,19 @@ real que el `sub` volvió a `.../poc/egress-gw`.
 
 ### RESUELTO 2026-09-09 — las AuthPolicy sobre `gw-hostnet` nunca estuvieron enforceadas
 
-**Causa raíz encontrada.** Las tres `AuthPolicy` del namespace están en `Enforced: False`, con el
-mensaje `AuthPolicy waiting for the following components to sync: [Gateway (connlink-ingress/gw-hostnet)]`.
-No hubo evaluación de claims porque no hubo autorización aplicándose sobre ese gateway.
+Las tres `AuthPolicy` del namespace están en `Enforced: False`, con el mensaje
+`waiting for the following components to sync: [Gateway (connlink-ingress/gw-hostnet)]`.
+No hubo evaluación de claims porque no había autorización aplicándose sobre ese gateway.
 
-El `Enforced: False` que el 2026-09-02 se descartó como *"estado transitorio justo después de crear
-el recurso"* **no era transitorio**: sigue igual semanas después. Esa lectura errónea desvió toda la
-investigación. Los filtros presentes en el `config_dump` no lo contradicen: Kuadrant instala el
-`ext_authz` por la label `kuadrant.io/gateway` del Gateway, pero puebla las *action sets* recién
-cuando una policy queda `Enforced` — filtro sin action sets deja pasar todo sin loguear nada.
+El `Enforced: False` que acá arriba se descartó como *"estado transitorio justo después de crear el
+recurso"* **no era transitorio**: sigue igual semanas después. Esa lectura desvió la investigación.
 
 Diagnóstico completo, hipótesis descartadas y salidas en
-[`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md).
+[`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md)
+— es la única fuente de verdad de este tema, no duplicar el análisis acá.
 
 **Consecuencia que excede a la PoC**: el ingreso `gw-hostnet` no aplica ninguna política de
 autorización de Kuadrant, y su status lo venía diciendo desde que se creó.
-
-### (histórico) Actualización 2026-09-09 — dos hipótesis refutadas, y el dato que falta
-
-Se investigaron y **descartaron con evidencia** las dos explicaciones más plausibles. Quedan
-anotadas para que nadie las vuelva a recorrer:
-
-1. **Poda silenciosa del campo `predicate` por deriva de schema del CRD.** Refutada: los tres
-   predicados están completos en el objeto guardado
-   (`oc get authpolicy … -o json | jq '..|.predicate? // empty'`).
-2. **istiod no le empuja el `ext_authz` al gateway desplegado a mano.** Refutada: el
-   `config_dump` del Envoy de `gw-hostnet` tiene 63 `authorino`, 7 `ext_authz` y 149 `kuadrant`.
-   Esta hipótesis pretendía además unificar este hallazgo con el bloqueo de SDS del runbook
-   §7.2 — no van juntos, y ese bloqueo se resolvió por su cuenta (runbook §7.2, actualizado).
-
-Con eso, el problema se parte en dos ramas mutuamente excluyentes, y hay **un solo dato** que
-decide cuál — el mismo que faltaba el 2026-09-02: **¿Authorino llegó a ver el request?**
-
-- **No lo vio** → el wasm-shim no matcheó el request contra ninguna action set y lo dejó pasar
-  sin evaluar. Hipótesis principal de esa rama: el `:authority` llega con puerto
-  (`…svc.cluster.local:8080`, porque el egreso no reescribe el Host) y el `HTTPRoute` declara el
-  hostname sin puerto. Explicaría los cuatro síntomas juntos, incluido que no haya error en
-  ningún log.
-- **Lo vio y devolvió `authorized:true`** → la evaluación es el problema (candidato principal:
-  `aud` tratado como string, donde `in` en CEL hace substring match).
-
-Árbol de decisión completo, con los comandos de cada rama y la forma correcta de repetir la
-prueba negativa (incluido el `rollout restart` que faltó, sin el cual se prueba con el token
-viejo cacheado), en
-[`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md).
-
-Pendiente para el equipo con acceso a OCP: revisar por qué el bloque `authorization.claims-esperados`
-del `AuthPolicy` no está bloqueando nada — candidatos: error de sintaxis en las expresiones CEL que
-las hace evaluar siempre `true` (o error silencioso tratado como éxito), o que Kuadrant no esté
-aplicando ese bloque en absoluto pese a mostrar `Enforced: True`. No se pudo diagnosticar más sin
-logs de Authorino/kuadrant-operator del lado OCP en el momento exacto de una de estas pruebas.
-
-**Hallazgo aparte, ya corregido**: el `CronJob` (`poc-ingress-kuadrant/eks-origen/vault/02-vault-login-cronjob-eks.yaml`) tiene un bug de
-schedule — `*/50 * * * *` en el campo de minutos corre en los minutos **0 y 50** de cada hora
-(intervalo irregular: 10 min entre `:50`→`:00`, luego 50 min entre `:00`→`:50`), no "cada 50
-minutos" parejo como decía el comentario original. No es grave (el TTL del token es 1h, así que
-igual refresca a tiempo) pero el comentario del archivo está mal — corregir a algo como
-`"25,55 * * * *"` si se quiere un intervalo realmente parejo de 30 min, o documentar el
-comportamiento real si `*/50` se deja como está.
 
 ## 2quinquies. Estabilidad y latencia — batería completa (2026-09-02, post-fix de Authorino)
 
@@ -597,10 +558,13 @@ falta de conectividad privada para `client_credentials`, ver §2quater/2quinquie
 resto del historial de evaluación).
 
 **Actualización 2026-09-02**: esto dejó de ser solo una evaluación — la integración se desplegó en
-vivo en el cluster origen (EKS), con estabilidad confirmada bajo carga real (§2quinquies). El lado
-OCP, sin embargo, **no está validando correctamente las claims del token** — confirmado en vivo
-(§2quater): un JWT-SVID con `sub` no autorizado pasó igual. Es el único bloqueante real que queda
-antes de considerar esto cerrado end-to-end; requiere acción del equipo con acceso a OCP.
+vivo en el cluster origen (EKS), con estabilidad confirmada bajo carga real (§2quinquies).
+
+**Cierre 2026-09-09**: el mecanismo de Vault como emisor quedó validado. Lo que parecía un problema
+de validación de claims del lado OCP **no era de Vault ni de las `AuthPolicy`**: las policies sobre
+`gw-hostnet` nunca estuvieron `Enforced` (Kuadrant lo reporta en el status). Causa raíz y salidas en
+[`poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md`](../poc-onprem-kuadrant/destino-arqlab/14-diagnostico-claims.md).
+Es un problema de plataforma del ingreso, no de este diseño.
 
 ---
 

@@ -57,6 +57,17 @@ Encaja con los cuatro síntomas a la vez, incluido el más desconcertante:
    `config_dump` de arriba. Iba en la dirección correcta pero se verificó lo que no era: la
    pregunta no era *"¿está el filtro?"* sino *"¿Kuadrant considera sincronizado al gateway?"*.
 
+## Dato nuevo (2026-09-09) que refuerza la hipótesis de abajo
+
+El mismo proxy **tampoco recibe secrets por SDS**: `shard1-paas-demo` y `destino-ca-cacert` los dos
+en `warming`, `activos` solo con `default` y `ROOTCA`. Dos fallas distintas —no recibe material
+criptográfico, y Kuadrant no lo considera sincronizado— sobre el mismo proxy desplegado a mano.
+
+Eso reabre parcialmente la hipótesis 2 que se había refutado: la refutación es válida en su
+literalidad (el filtro `ext_authz` SÍ está en el `config_dump`), pero el patrón más amplio —istiod
+no asocia del todo este proxy al recurso `Gateway`— vuelve a ser el mejor candidato. **Sigue siendo
+hipótesis.**
+
 ## Lo que falta: por qué no sincroniza
 
 El mensaje apunta a `Gateway (connlink-ingress/gw-hostnet)`. Ese gateway es de la GatewayClass

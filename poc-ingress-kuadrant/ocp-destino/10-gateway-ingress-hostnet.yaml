@@ -65,17 +65,16 @@ spec:
 ---
 # --- Listener HTTPS:443 — runbook §7.1 (agregado aparte, no en la creación) -
 #
-# DEPENDE DE QUE SE RESUELVA EL BLOQUEO DEL RUNBOOK §7.2: Envoy pide el cert
-# por SDS y nunca lo recibe (`cross namespace secret reference requires
-# ReferenceGrant`, aunque Gateway y Secret están en el mismo namespace — es un
-# hallazgo abierto, no un error de configuración de este manifiesto). Estado
-# documentado como ❌ bloqueado en el runbook §10 al momento de escribir esto.
+# ESTADO DEL BLOQUEO DEL RUNBOOK §7.2 (Envoy pedía el cert por SDS y nunca lo
+# recibía): al 2026-09-03 el listener 443 pasó a ResolvedRefs=True, así que
+# probablemente esté resuelto — pero NO está confirmado, porque ResolvedRefs=True
+# no prueba que el cert llegó al proxy (ver la verificación por
+# dynamic_active_secrets más abajo en este mismo archivo).
 #
-# Si el §7.2 sigue sin resolverse cuando toque implementar esto: usar el
-# workaround del runbook §7.3 (terminar TLS en el F5, dejar el Gateway sólo en
-# HTTP:80, pool F5 apuntando a <IPs de nodo>:80) — las AuthPolicy/RateLimitPolicy
-# de Kuadrant siguen operando igual sobre el Gateway/HTTPRoute, no dependen de
-# dónde se termina el TLS.
+# Si al verificar sigue en `warming`: usar el workaround del runbook §7.3
+# (terminar TLS en el F5, dejar el Gateway sólo en HTTP:80, pool F5 apuntando a
+# <IPs de nodo>:80) — las AuthPolicy/RateLimitPolicy de Kuadrant siguen operando
+# igual sobre el Gateway/HTTPRoute, no dependen de dónde se termina el TLS.
 #
 # Puerto 443 en el Service (si falta, no hay listener — mismo mecanismo que el 80):
 #   oc -n connlink-ingress patch svc gw-hostnet-ingress-hostnet --type=json \

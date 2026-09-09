@@ -1,0 +1,51 @@
+# DESTINO arqlab — publica el Gateway por el router default. LEER ANTES DE APLICAR.
+#
+# El gateway de egreso NO reescribe el Host, así que el request llega con DOS nombres:
+#
+#   Host: backend.poc-egress-kuadrant.svc.cluster.local:8080   <- el del cliente original
+#   SNI:  app3.paas-demo.bancogalicia.com.ar                   <- lo fija el DestinationRule
+#
+# Y el router HAProxy elige backend distinto según la terminación:
+#
+#   passthrough     -> modo TCP, elige por el SNI del ClientHello. No descifra, no ve el Host.
+#                      El SNI es app3, que es el host de esta Route: matchea, y el TLS lo termina
+#                      el Envoy del Gateway.
+#   edge/reencrypt  -> termina TLS y elige por el header Host, que acá es
+#                      backend.poc-egress-kuadrant.svc.cluster.local:8080. NINGUNA Route declara
+#                      ese host -> 503 del router en el 100% del tráfico, con un síntoma que no
+#                      señala a la causa.
+#
+# La alternativa (devolver el URLRewrite del Host al origen) choca con que Istio no soporta
+# filtros a nivel de backendRef (istio#39136): con dos backends en la misma rule el filtro
+# aplicaría también al local y se perdería el split por peso, que es la herramienta central de la
+# migración progresiva.
+#
+# El DNS ya está: app3.paas-demo -CNAME-> shard1.paas-demo -A-> 10.254.124.36, cuyo PTR es
+# *.apps.paas-arqlab -> es la VIP del router default, que es justo quien admite esta Route.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: app3-lab-passthrough
+  namespace: poc-ingress-kuadrant
+  labels:
+    poc.galicia.io/rol: destino-arqlab
+spec:
+  host: app3.paas-demo.bancogalicia.com.ar
+  to:
+    kind: Service
+    name: ingress-gw-lab-openshift-default
+    weight: 100
+  port:
+    targetPort: 443
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: None
+  wildcardPolicy: None
+---
+# Confirmar el nombre REAL del Service que crea el Gateway antes de aplicar:
+#   oc --context=paas-arqlab -n poc-ingress-kuadrant get svc \
+#     -l gateway.networking.k8s.io/gateway-name=ingress-gw-lab
+#
+# Y que el router la admitió:
+#   oc --context=paas-arqlab -n poc-ingress-kuadrant get route app3-lab-passthrough \
+#     -o jsonpath='{.status.ingress[0].conditions[?(@.type=="Admitted")].status}{"\n"}'
