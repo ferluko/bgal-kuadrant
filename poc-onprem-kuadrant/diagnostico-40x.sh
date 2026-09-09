@@ -170,12 +170,16 @@ echo
 echo "  ¿el token del Secret sirve HOY? (si esto da 200, el token está bien y el problema es Authorino)"
 if [ -n "${TOK:-}" ]; then
   IMG2=$(oco -n "$NS_KUA" get cronjob -o jsonpath="{.items[0].spec.jobTemplate.spec.template.spec.containers[0].image}")
+  OV='{"spec":{"serviceAccountName":"authorino-authorino"}}'
   oc --context="$CTX_ORI" run diag40xtok-$$ -n "$NS_KUA" --rm -i --restart=Never --quiet \
      --image="${IMG2:-alpine/k8s:1.30.0}" --request-timeout=90s --env="T=$TOK" \
-     --overrides='"'"'{"spec":{"serviceAccountName":"authorino-authorino"}}'"'"' \
-     -- sh -c "curl -sS -o /dev/null -w 'mint_con_el_token_del_secret=%{http_code}\n' --max-time 15 -X POST \
-        '$VAULT_ADDR/v1/spiffe/role/$SPIFFE_ROLE/mintjwt' -H 'X-Vault-Namespace: $VAULT_NS' \
-        -H \"X-Vault-Token: \$T\" -d '{\"audience\": \"probe\"}'" 2>&1 | sed "s/^/  /"
+     --overrides="$OV" \
+     -- sh -c 'curl -sS --max-time 15 -X POST "'"$VAULT_ADDR"'/v1/spiffe/role/'"$SPIFFE_ROLE"'/mintjwt" \
+        -H "X-Vault-Namespace: '"$VAULT_NS"'" -H "X-Vault-Token: $T" -d "{\"audience\": \"probe\"}" \
+        | head -c 300' 2>&1 | sed "s/^/  /"
+  echo
+  n "Si eso trae un token => el Secret está bien y el problema es la copia que tiene Authorino."
+  n "Si trae 'permission denied / invalid token' => el token del Secret venció: mirar el CronJob."
 fi
 echo
 n "FIX INMEDIATO (band-aid conocido, ya usado en arqlab):"
