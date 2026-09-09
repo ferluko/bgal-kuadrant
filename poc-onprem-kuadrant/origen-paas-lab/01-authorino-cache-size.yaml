@@ -1,6 +1,6 @@
 # ORIGEN paas-lab — BLOQUEANTE #1. Aplicar ESTE PRIMERO, antes que nada.
 #
-# Medido en paas-lab el 2026-09-09: el mint a HCP Vault tarda 483-486 ms, las cinco muestras.
+# Medido en paas-lab el 2026-09-09: el mint a HCP Vault tarda ~160 ms (reuso de conexion), las cinco muestras.
 # No es jitter, es un piso duro de RTT desde on-prem. El ext_authz de Kuadrant corta a 200 ms
 # FIJOS. Sin cache, cada request dispara un mint que no llega a tiempo.
 #

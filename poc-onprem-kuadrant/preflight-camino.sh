@@ -361,7 +361,7 @@ fi
 ECSO=$(oco -n kuadrant-system get authorino -o jsonpath='{.items[0].spec.evaluatorCacheSize}' 2>/dev/null)
 if [[ "${ECSO:-0}" -ge 10 ]] 2>/dev/null; then ok "evaluatorCacheSize en paas-lab" "$ECSO"
 else bad "evaluatorCacheSize en paas-lab" "${ECSO:-unset}" ">=10"
-     nota "bloqueante #1: con el mint en 485ms y el ext_authz en 200ms, sin cache falla casi todo"
+     nota "bloqueante #1: con el mint en ~160 ms y el ext_authz en 200ms, sin cache falla casi todo"
      nota "aplicar origen-paas-lab/01-authorino-cache-size.yaml"; fi
 
 # ─────────────────────────────────────────────────────────────────────────────

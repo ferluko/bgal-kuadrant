@@ -57,7 +57,7 @@ spec:
           body:
             expression: '"{\"audience\": \"app3.paas-demo.bancogalicia.com.ar\"}"'
         # REQUIERE 01-authorino-cache-size.yaml aplicado. Sin eso esto no cachea nada y,
-        # con 485 ms de mint contra 200 ms de ext_authz, falla casi siempre.
+        # con ~160 ms de mint contra 200 ms de ext_authz, falla casi siempre.
         cache:
           key:
             expression: '"egress-gw-paas-lab"'

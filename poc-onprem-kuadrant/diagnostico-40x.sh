@@ -81,6 +81,11 @@ n "  'no such key: data'  -> ORIGEN. Vault no devolvió {data:{token}}: respondi
 n "                          Casi siempre X-Vault-Token vacío/vencido => Authorino tiene un valor"
 n "                          stale del Secret leído por sharedSecretRef. Ver punto 9."
 n "  ausente + 401/403    -> el rechazo es del DESTINO; leer el body (mensajes de abajo)."
+n "  ausente + 500 'Internal Server Error.' de istio-envoy"
+n "                       -> NO es un deny: la llamada al ext_authz FALLO (UNAVAILABLE)."
+n "                          Causa medida: el mint a Vault tarda ~160 ms y el ext_authz de"
+n "                          Kuadrant corta a 200ms FIJOS. Pasa en cada cache-miss (ttl 250s)."
+n "                          Se confirma con el loop del punto 11."
 n ""
 n "LECTURA DEL BODY — cada mensaje apunta a un lado distinto:"
 n "  'falta o es invalido el token de egreso'      -> 401 AUTHN en el DESTINO: firma/parseo/JWKS"
@@ -154,8 +159,13 @@ n "'no such key: data' = Authorino mandó el X-Vault-Token vacío (estado stale)
 n "Fix conocido: oc --context=$CTX_ORI -n $NS_KUA rollout restart deployment authorino"
 
 sec "7. Logs de Authorino — DESTINO (¿llegó el request?)"
-ocd -n "$NS_KUA" logs --tail=60 deploy/authorino 2>/dev/null \
-  | grep -i 'authorized\|denied\|backend-lab\|unauthenticated' | tail -12 | sed 's/^/  /' || n "sin líneas relevantes"
+# OJO: en arqlab el MISMO Authorino atiende su rol de ORIGEN (poc-egress-kuadrant, hacia EKS) y
+# el de DESTINO (poc-ingress-kuadrant, recibe a paas-lab). Sin filtrar se ven los de origen y uno
+# cree que son del cruce. El discriminante: el destino ve el FQDN interno del ORIGEN paas-lab.
+ocd -n "$NS_KUA" logs --tail=300 deploy/authorino 2>/dev/null \
+  | grep 'backend\.poc-egress-kuadrant\.svc\.cluster\.local' \
+  | grep -o '"ts":"[^"]*"\|"authorized":[a-z]*\|"message":"[^"]*"' | paste -d' ' - - - 2>/dev/null \
+  | tail -8 | sed 's/^/  /' || n "sin líneas del cruce"
 n "SIN NINGUNA LÍNEA = Authorino del destino NUNCA vio el request: el 40x es del gateway o del"
 n "router, no de la autorización. Mirar el punto 5 (hostname) y el estado del listener."
 
@@ -190,7 +200,28 @@ n "vence (1h). Para saber si es un time bomb y no un incidente puntual: reinicia
 n "que anda, y volver a probar 70-80 min después SIN tocar nada. Si vuelve el 403, el diseño"
 n "necesita que Authorino relea el Secret, no reinicios."
 
-sec "10. La trampa del cache — leer si cambiaste la audiencia hace poco"
+sec "11. Loop de 10 requests — distingue timeout de rechazo"
+n "Un ext_authz que se pasa de los 200ms falla SOLO en el cache-miss. El patrón es inconfundible:"
+n "la primera falla y las siguientes andan, y vuelve a fallar ~250s después."
+enbff <<'PYLOOP' 2>&1 | sed 's/^/  /'
+import json,time,urllib.request,urllib.error
+u="http://backend.poc-egress-kuadrant.svc.cluster.local:8080/"
+for i in range(1,11):
+    t=time.time()
+    try:
+        r=urllib.request.urlopen(u,timeout=20); code=str(r.status); b=r.read()
+        try: pod=json.loads(b).get("environment",{}).get("HOSTNAME","?")
+        except Exception: pod="?"
+    except urllib.error.HTTPError as e: code=str(e.code); pod="-"
+    except Exception as e: code=type(e).__name__; pod="-"
+    print("%2d  %-22s %6.0f ms   pod=%s"%(i,code,(time.time()-t)*1000,pod))
+    time.sleep(1)
+PYLOOP
+n "TODAS 200            -> el camino funciona; el 500 anterior fue el cache-miss."
+n "1 falla + 9 en 200   -> confirmado: timeout del ext_authz en el mint. Ver el doc 16."
+n "TODAS fallan igual   -> no es timing: mirar el punto 1 y el estado del destino."
+
+sec "12. La trampa del cache — leer si cambiaste la audiencia hace poco"
 n "La AuthPolicy cachea el JWT-SVID con cache.key constante y ttl 250s. Si cambiaste la audiencia"
 n "(o el role de Vault), Authorino sigue sirviendo el token VIEJO hasta 250s, y el destino lo"
 n "rechaza por 'aud'. Un 403 que aparece con retraso y se arregla solo es exactamente esto."

@@ -308,12 +308,15 @@ J=\$(curl -sS --max-time 15 "\$V/$VAULT_NS/$SPIFFE_MOUNT/.well-known/keys")
 echo "JWKS_KIDS=\$(printf %s "\$J" | grep -o '"kid"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//; s/"\$//' | tr '\n' ',')"
 if [ -n "\$KID" ] && printf %s "\$J" | grep -q "\$KID"; then echo "KID_MATCH=si"; else echo "KID_MATCH=no"; fi
 
-echo "### 3.5 latencia del mint (5 muestras)"
-for i in 1 2 3 4 5; do
-  curl -sS -o /dev/null -w '%{time_total}\n' --max-time 20 -X POST \
-    "\$V/$SPIFFE_MOUNT/role/$SPIFFE_ROLE/mintjwt" -H "\$H" \
-    -H "X-Vault-Token: \$VAULT_SESSION_TOKEN" -d '{"audience": "$AUD_PROBE"}'
-done | awk '{printf "%.0f ", \$1*1000} END{print ""}' | sed 's/^/LAT_MS=/'
+echo "### 3.5 latencia del mint — CON REUSO DE CONEXION"
+# Cinco invocaciones separadas de curl miden 5 handshakes TLS, no 5 mints: infla el numero
+# ~3x (medido: 485 ms separados vs 160 ms reusando). Authorino usa pool, asi que lo que
+# importa es el numero tibio. Una sola invocacion con la URL repetida reusa la conexion.
+MU="\$V/$SPIFFE_MOUNT/role/$SPIFFE_ROLE/mintjwt"
+curl -sS -o /dev/null -w '%{time_total}\n' --max-time 30 -X POST -H "\$H" \
+  -H "X-Vault-Token: \$VAULT_SESSION_TOKEN" -d '{"audience": "$AUD_PROBE"}' \
+  "\$MU" "\$MU" "\$MU" "\$MU" "\$MU" "\$MU" \
+  | awk '{printf "%.0f ", \$1*1000} END{print ""}' | sed 's/^/LAT_MS=/'
 PODSCRIPT
 }
 
@@ -371,8 +374,11 @@ else
   LAT="$(g LAT_MS)"
   if [ -n "$LAT" ]; then
     MAXL=$(printf '%s\n' $LAT | tr ' ' '\n' | grep -v '^$' | sort -n | tail -1)
+    # La PRIMERA muestra incluye el handshake; las siguientes son el numero real.
     if [ "${MAXL:-0}" -gt "$MINT_BUDGET_MS" ] 2>/dev/null; then
       warn "latencia del mint: ${LAT}ms (max ${MAXL}ms) > ${MINT_BUDGET_MS}ms del ext_authz"
+      info "ignorar la PRIMERA muestra (handshake). Si las demas entran holgadas, el timeout"
+      info "no es el problema; si rozan el limite, hay margen insuficiente y falla con jitter."
       info "sin cache real de Authorino esto es fallo intermitente (arqlab: ~25% en 15 reqs)."
       info "con evaluatorCacheSize OK + cache.ttl 250 se mintea 1 vez cada 250s, no por request."
     else

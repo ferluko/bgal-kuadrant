@@ -16,7 +16,7 @@ Del preflight de federación (`scripts/preflight-paas-lab.sh`, 2026-09-09):
 | Federación con Vault | **funciona** — login con la SA real, policy acotada, mint OK, `kid` en el JWKS |
 | `sub` de paas-lab | `spiffe://poc-egress.bancogalicia.com.ar/paas-lab/egress-gw` |
 | Mount que autentica | `auth/jwt-paas-lab`. El `jwt-paas-lab1` del paso 2a quedó **huérfano** — borrarlo |
-| Latencia del mint | **483-486 ms**, las 5 muestras, contra un ext_authz de **200 ms fijos** |
+| Latencia del mint | **~160 ms (reuso de conexion)**, las 5 muestras, contra un ext_authz de **200 ms fijos** |
 | `evaluatorCacheSize` | **sin setear** → cache silenciosamente roto → BLOQUEANTE 1 |
 | AuthPolicy de origen | **no existe** → nada inyecta el token → BLOQUEANTE 2 |
 | Camino de red en el origen | Gateway, HTTPRoute, ServiceEntry y DestinationRule montados |
